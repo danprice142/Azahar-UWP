@@ -64,3 +64,6 @@ GIT-TAG
 
 # verify-release.sh downloads
 verify/
+
+# UWP ScreenScraper developer credentials (see src/citra_uwp/CMakeLists.txt)
+src/citra_uwp/screenscraper_credentials.cmake

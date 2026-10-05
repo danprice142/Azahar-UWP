@@ -8,12 +8,12 @@
 #include <optional>
 #include <type_traits>
 #include <boost/crc.hpp>
-#include "common/bit_field.h"
 #include "common/swap.h"
 
 namespace InputCommon::CemuhookUDP {
 
 constexpr std::size_t MAX_PACKET_SIZE = 100;
+constexpr std::size_t EXTENDED_MAX_PACKET_SIZE = 8192;
 constexpr u16 PROTOCOL_VERSION = 1001;
 constexpr u32 CLIENT_MAGIC = 0x43555344; // DSUC (but flipped for LE)
 constexpr u32 SERVER_MAGIC = 0x53555344; // DSUS (but flipped for LE)
@@ -22,6 +22,22 @@ enum class Type : u32 {
     Version = 0x00100000,
     PortInfo = 0x00100001,
     PadData = 0x00100002,
+    Keyboard = 0x00120000,
+    Mouse = 0x00120001,
+    Command = 0x00130000,
+    State = 0x00140000,
+    StreamStart = 0x00150000,
+    StreamStop = 0x00150001,
+    StreamStatus = 0x00150002,
+    AuxStreamStart = 0x00150100,
+    AuxStreamStop = 0x00150101,
+    AppLibraryRequest = 0x00180000,
+    AppLibraryPage = 0x00180001,
+    AppIconRequest = 0x00180002,
+    AppIconChunk = 0x00180003,
+    AppLaunch = 0x00180004,
+    AppLaunchStatus = 0x00180005,
+    AppSelection = 0x00180006,
 };
 
 struct Header {
@@ -136,29 +152,11 @@ struct PadData {
     PortInfo info{};
     u32_le packet_counter{};
 
+    // Bits 0..15 are Share, L3, R3, Options, Up, Right, Down, Left, L2, R2, L1,
+    // R1, X, A, B, and Y respectively.
     u16_le digital_button{};
-    // The following union isn't trivially copyable but we don't use this input anyway.
-    // union DigitalButton {
-    //     u16_le button;
-    //     BitField<0, 1, u16> button_1;   // Share
-    //     BitField<1, 1, u16> button_2;   // L3
-    //     BitField<2, 1, u16> button_3;   // R3
-    //     BitField<3, 1, u16> button_4;   // Options
-    //     BitField<4, 1, u16> button_5;   // Up
-    //     BitField<5, 1, u16> button_6;   // Right
-    //     BitField<6, 1, u16> button_7;   // Down
-    //     BitField<7, 1, u16> button_8;   // Left
-    //     BitField<8, 1, u16> button_9;   // L2
-    //     BitField<9, 1, u16> button_10;  // R2
-    //     BitField<10, 1, u16> button_11; // L1
-    //     BitField<11, 1, u16> button_12; // R1
-    //     BitField<12, 1, u16> button_13; // Triangle
-    //     BitField<13, 1, u16> button_14; // Circle
-    //     BitField<14, 1, u16> button_15; // Cross
-    //     BitField<15, 1, u16> button_16; // Square
-    // } digital_button;
 
-    u8 home;
+    u8 home{};
     /// If the device supports a "click" on the touchpad, this will change to 1 when a click happens
     u8 touch_hard_press{};
     u8 left_stick_x{};
@@ -167,18 +165,10 @@ struct PadData {
     u8 right_stick_y{};
 
     struct AnalogButton {
-        u8 button_8{};
-        u8 button_7{};
-        u8 button_6{};
-        u8 button_5{};
-        u8 button_12{};
-        u8 button_11{};
-        u8 button_10{};
-        u8 button_9{};
-        u8 button_16{};
-        u8 button_15{};
-        u8 button_14{};
-        u8 button_13{};
+        // DSU 1001 wire order.
+        std::array<u8, 4> dpad{};     // Left, Down, Right, Up
+        std::array<u8, 4> face{};     // Y, B, A, X
+        std::array<u8, 4> shoulder{}; // R1, L1, R2, L2
     } analog_button;
 
     struct TouchPad {
@@ -188,7 +178,7 @@ struct PadData {
         u16_le y{};
     } touch_1, touch_2;
 
-    u64_le motion_timestamp;
+    u64_le motion_timestamp{};
 
     struct Accelerometer {
         float x{};

@@ -22,6 +22,17 @@ include(DownloadExternals)
 include(CMakeDependentOption)
 
 project(citra LANGUAGES C CXX ASM)
+
+# The WindowsStore generator can leave CMAKE_SYSTEM_PROCESSOR empty, which would disable the
+# SIMD code paths below.
+if(WINDOWS_STORE AND NOT CMAKE_SYSTEM_PROCESSOR)
+    if(CMAKE_GENERATOR_PLATFORM MATCHES "^[Xx]64$")
+        set(CMAKE_SYSTEM_PROCESSOR "AMD64")
+    elseif(CMAKE_GENERATOR_PLATFORM MATCHES "^[Aa][Rr][Mm]64$")
+        set(CMAKE_SYSTEM_PROCESSOR "ARM64")
+    endif()
+endif()
+
 # must be invoked after project() command when using CMAKE_TOOLCHAIN_FILE
 include(FindPkgConfig)
 if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -613,6 +624,36 @@ if (USE_SYSTEM_FAAD)
 endif()
 
 add_subdirectory(src)
+
+# UWP compatibility fixups; these must run after both add_subdirectory() calls above.
+if (WINDOWS_STORE)
+    include(UwpCompat)
+    uwp_relax_warnings_in_directory("${CMAKE_CURRENT_SOURCE_DIR}/externals")
+    uwp_relax_warnings_in_directory("${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+    # Targets that call Win32 APIs unavailable in the app partition. uwp_compat_jit must not
+    # receive the shim: <windows.h> would restore the SDK's *FromApp forwarders.
+    add_library(uwp_compat_jit STATIC src/uwp/compat/uwp_jit_memory.cpp)
+    target_link_libraries(uwp_compat_jit PUBLIC kernel32.lib)
+
+    foreach(_uwp_shim_target boost_iostreams dynarmic web_service)
+        uwp_apply_compat_to_target(${_uwp_shim_target})
+    endforeach()
+
+    # Linked by the executable; dynarmic's install(EXPORT) rule rejects the dependency.
+    target_link_libraries(citra_uwp PRIVATE uwp_compat_jit)
+
+    # citra_core cannot take the full shim (<windows.h> defines ERROR_* macros that collide with
+    # Result constants). cryptopp's config_os.h needs <winapifamily.h>, and only the translation
+    # units that include httplib.h need the Win32 wrappers.
+    uwp_force_include_header(citra_common "winapifamily.h")
+    uwp_force_include_header(citra_core "winapifamily.h")
+
+    uwp_apply_compat_to_sources(citra_core
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/hle/service/http/http_c.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/hle/service/service.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/nus_download.cpp")
+endif()
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT citra_meta)
 

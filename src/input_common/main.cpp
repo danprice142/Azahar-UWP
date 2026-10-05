@@ -2,7 +2,9 @@
 // Licensed under GPLv2 or any later version
 // Refer to the misc/licenses/gplv2.txt file included.
 
+#include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <thread>
 #include "common/param_package.h"
@@ -104,6 +106,14 @@ std::string ButtonToText(const Common::ParamPackage& param) {
         return {};
     }
 
+    if (engine_str == "cemuhookudp" || engine_str == "cemuhookudp_addon") {
+        if (param.Has("axis")) {
+            return param.Get("name", "DSU Axis " + param.Get("axis", "")) +
+                   param.Get("direction", "");
+        }
+        return param.Get("name", "DSU Button " + param.Get("button", ""));
+    }
+
     if (engine_str == "gcpad") {
         if (param.Has("axis")) {
             const auto axis_str = param.Get("axis", "");
@@ -137,7 +147,8 @@ std::string AnalogToText(const Common::ParamPackage& param, const std::string& d
     const auto name_y_str = param.Get("name_y", "");
     static const auto plus_str = "+";
     static const auto minus_str = "-";
-    if (engine_str == "sdl" || engine_str == "gcpad") {
+    if (engine_str == "sdl" || engine_str == "gcpad" || engine_str == "cemuhookudp" ||
+        engine_str == "cemuhookudp_addon") {
         if (dir == "modifier") {
             return "[unused]";
         }
@@ -245,6 +256,10 @@ std::vector<std::unique_ptr<DevicePoller>> GetPollers(DeviceType type) {
 #ifdef HAVE_SDL2
     pollers = sdl->GetPollers(type);
 #endif
+    if (udp) {
+        auto udp_pollers = udp->GetPollers(type);
+        std::move(udp_pollers.begin(), udp_pollers.end(), std::back_inserter(pollers));
+    }
 #ifdef ENABLE_GCADAPTER
     switch (type) {
     case DeviceType::Analog:

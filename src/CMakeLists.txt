@@ -205,6 +205,11 @@ if (ENABLE_QT)
     add_subdirectory(citra_qt)
 endif()
 
+# The UWP frontend. Qt is not available inside an app container.
+if (WINDOWS_STORE)
+    add_subdirectory(citra_uwp)
+endif()
+
 if (ENABLE_QT) # Or any other hypothetical future frontends
     add_subdirectory(citra_cli)
     add_subdirectory(citra_meta)

@@ -1,0 +1,13 @@
+diff --git a/libavutil/cpu.c b/libavutil/cpu.c
+index 0035e927dd..92dbf089e4 100644
+--- a/libavutil/cpu.c
++++ b/libavutil/cpu.c
+@@ -219,7 +219,7 @@ int av_cpu_count(void)
+ 
+     if (!sched_getaffinity(0, sizeof(cpuset), &cpuset))
+         nb_cpus = CPU_COUNT(&cpuset);
+-#elif HAVE_GETPROCESSAFFINITYMASK
++#elif HAVE_GETPROCESSAFFINITYMASK && !HAVE_WINRT
+     DWORD_PTR proc_aff, sys_aff;
+     if (GetProcessAffinityMask(GetCurrentProcess(), &proc_aff, &sys_aff))
+         nb_cpus = av_popcount64(proc_aff);

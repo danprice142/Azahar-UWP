@@ -1,0 +1,66 @@
+diff --git a/src/util/uwp_util.cpp b/src/util/uwp_util.cpp
+index 6624c2ce..983aac79 100644
+--- a/src/util/uwp_util.cpp
++++ b/src/util/uwp_util.cpp
+@@ -1,6 +1,7 @@
+ #include "uwp_util.h"
+ 
+ #include <atomic>
++#include <cstdint>
+ #include <unknwn.h>
+ 
+ #include <winrt/Windows.Foundation.h>
+@@ -22,6 +23,19 @@ static DisplayInformation _uwpDisplayInfo = nullptr;
+ static HdmiDisplayInformation _uwpHdi = nullptr;
+ static HdmiDisplayMode _uwpHdm = nullptr;
+ 
++// Optional host-selected swap-chain size. Xbox frontends use this to apply model-specific output
++// limits before WGL creates the CoreWindow framebuffer (notably 2560x1440 on Series S).
++static std::atomic<std::uint64_t> output_size_override{0};
++
++extern "C" __declspec(dllexport) void uwp_set_output_size(int width, int height)
++{
++   const std::uint64_t packed = width > 0 && height > 0
++      ? (static_cast<std::uint64_t>(static_cast<std::uint32_t>(width)) << 32) |
++           static_cast<std::uint32_t>(height)
++      : 0;
++   output_size_override.store(packed, std::memory_order_release);
++}
++
+ static CoreWindow uwp_get_corewindow()
+ {
+    if (!_uwpCoreWind) {
+@@ -80,6 +94,10 @@ static int current_height = -1;
+ 
+ extern "C" int uwp_get_height(void)
+ {
++   const std::uint64_t override_size = output_size_override.load(std::memory_order_acquire);
++   if (override_size != 0)
++      return static_cast<int>(static_cast<std::uint32_t>(override_size));
++
+    if (current_height != -1)
+       return current_height;
+ 
+@@ -124,6 +142,10 @@ static int current_width = -1;
+ 
+ extern "C" int uwp_get_width(void)
+ {
++   const std::uint64_t override_size = output_size_override.load(std::memory_order_acquire);
++   if (override_size != 0)
++      return static_cast<int>(static_cast<std::uint32_t>(override_size >> 32));
++
+    if (current_width != -1)
+       return current_width;
+ 
+diff --git a/src/util/uwp_util.h b/src/util/uwp_util.h
+index e405a806..2102db74 100644
+--- a/src/util/uwp_util.h
++++ b/src/util/uwp_util.h
+@@ -8,6 +8,7 @@ extern "C" {
+ void* uwp_get_window_reference(void);
+ int uwp_get_height(void);
+ int uwp_get_width(void);
++__declspec(dllexport) void uwp_set_output_size(int width, int height);
+ 
+ #ifdef __cplusplus
+ }

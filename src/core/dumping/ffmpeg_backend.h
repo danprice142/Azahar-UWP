@@ -49,7 +49,8 @@ protected:
     ~FFmpegStream();
 
     void WritePacket(AVPacket* packet);
-    void SendFrame(AVFrame* frame);
+    /// Returns false when the encoder refused the frame.
+    bool SendFrame(AVFrame* frame);
 
     struct AVCodecContextDeleter {
         void operator()(AVCodecContext* codec_context) const {
@@ -83,15 +84,24 @@ class FFmpegVideoStream : public FFmpegStream {
 public:
     ~FFmpegVideoStream();
 
-    bool Init(FFmpegMuxer& muxer, const Layout::FramebufferLayout& layout);
+    bool Init(FFmpegMuxer& muxer, const Layout::FramebufferLayout& layout, u32 target_fps,
+              bool low_latency);
     void Free();
     void ProcessFrame(VideoFrame& frame);
 
 private:
+    bool OpenCodec(bool hardware);
     bool InitHWContext(const AVCodec* codec);
     bool InitFilters();
 
     u64 frame_count{};
+    const AVCodec* codec{};
+
+    /// Media Foundation encoder in low-latency mode: hardware first, forced keyframes.
+    bool mf_streaming = false;
+    bool hardware_encoding = false;
+    bool first_frame_pending = true;
+    s64 next_keyframe_pts = 0;
 
     std::unique_ptr<AVFrame, AVFrameDeleter> current_frame{};
     std::unique_ptr<AVFrame, AVFrameDeleter> filtered_frame{};
@@ -118,9 +128,8 @@ private:
     // These don't need to be freed apparently
     AVFilterContext* source_context;
     AVFilterContext* sink_context;
-
-    /// The filter graph to use. This graph means 'change FPS to 60, convert format if needed'
-    static constexpr std::string_view filter_graph_desc = "fps=60";
+    u32 target_fps = 60;
+    bool low_latency = false;
 };
 
 /**
@@ -132,7 +141,7 @@ class FFmpegAudioStream : public FFmpegStream {
 public:
     ~FFmpegAudioStream();
 
-    bool Init(FFmpegMuxer& muxer);
+    bool Init(FFmpegMuxer& muxer, bool streaming);
     void Free();
     void ProcessFrame(const VariableAudioFrame& channel0, const VariableAudioFrame& channel1);
     void Flush();
@@ -162,7 +171,8 @@ class FFmpegMuxer {
 public:
     ~FFmpegMuxer();
 
-    bool Init(const std::string& path, const Layout::FramebufferLayout& layout);
+    bool Init(const std::string& path, const Layout::FramebufferLayout& layout,
+              bool audio_enabled = true, u32 target_fps = 60, bool low_latency = false);
     void Free();
     void ProcessVideoFrame(VideoFrame& frame);
     void ProcessAudioFrame(const VariableAudioFrame& channel0, const VariableAudioFrame& channel1);
@@ -180,10 +190,18 @@ private:
 
     FFmpegAudioStream audio_stream{};
     FFmpegVideoStream video_stream{};
+    bool audio_enabled = true;
     std::unique_ptr<AVFormatContext, AVFormatContextDeleter> format_context{};
     std::mutex format_context_mutex;
 
     friend class FFmpegStream;
+};
+
+struct FFmpegBackendConfig {
+    bool manage_renderer_capture = true;
+    bool audio_enabled = true;
+    u32 target_fps = 60;
+    bool low_latency = false;
 };
 
 /**
@@ -192,7 +210,10 @@ private:
  */
 class FFmpegBackend : public Backend {
 public:
-    FFmpegBackend(VideoCore::RendererBase& renderer);
+    /// Compatibility constructor; the third argument retains its video_only meaning.
+    FFmpegBackend(VideoCore::RendererBase& renderer, bool manage_renderer_capture = true,
+                  bool video_only = false);
+    FFmpegBackend(VideoCore::RendererBase& renderer, FFmpegBackendConfig config);
     ~FFmpegBackend() override;
     bool StartDumping(const std::string& path, const Layout::FramebufferLayout& layout) override;
     void AddVideoFrame(VideoFrame frame) override;
@@ -206,6 +227,10 @@ private:
     void EndDumping();
 
     VideoCore::RendererBase& renderer;
+    bool manage_renderer_capture = true;
+    bool audio_enabled = true;
+    u32 target_fps = 60;
+    bool low_latency = false;
     std::atomic_bool is_dumping = false; ///< Whether the backend is currently dumping
 
     FFmpegMuxer ffmpeg{};
@@ -218,6 +243,7 @@ private:
 
     std::array<Common::SPSCQueue<VariableAudioFrame>, 2> audio_frame_queues;
     std::thread audio_processing_thread;
+    std::mutex audio_submission_mutex;
 
     Common::Event processing_ended;
 };

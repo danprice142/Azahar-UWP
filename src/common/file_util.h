@@ -65,6 +65,7 @@ enum class UserPath {
     LegacyLime3DSConfigDir,
     LegacyLime3DSUserDir,
     LoadDir,
+    ModsDir,
     LogDir,
     NANDDir,
     RootDir,

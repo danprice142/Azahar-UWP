@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <utility>
 #include <vector>
 #include "common/assert.h"
@@ -89,6 +90,7 @@ public:
      * Executes the software keyboard, configured with the given parameters.
      */
     virtual void Execute(const KeyboardConfig& config_) {
+        data_ready.store(false, std::memory_order_relaxed);
         config = config_;
     }
 
@@ -136,7 +138,7 @@ protected:
     KeyboardConfig config;
     KeyboardData data;
 
-    bool data_ready = false;
+    std::atomic_bool data_ready{false};
 };
 
 class DefaultKeyboard final : public SoftwareKeyboard {

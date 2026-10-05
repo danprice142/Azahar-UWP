@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 
 #include "common/polyfill_thread.h"
@@ -21,6 +22,10 @@ namespace Core {
 class System;
 }
 
+namespace VideoDumper {
+class Backend;
+}
+
 namespace OpenGL {
 
 class RendererOpenGL;
@@ -32,7 +37,9 @@ class RendererOpenGL;
  */
 class FrameDumperOpenGL {
 public:
-    explicit FrameDumperOpenGL(Core::System& system, Frontend::EmuWindow& emu_window);
+    using BackendGetter = std::function<std::shared_ptr<VideoDumper::Backend>()>;
+    explicit FrameDumperOpenGL(Core::System& system, Frontend::EmuWindow& emu_window,
+                               BackendGetter backend_getter = {});
     ~FrameDumperOpenGL();
 
     bool IsDumping() const;
@@ -43,12 +50,13 @@ public:
     std::unique_ptr<Frontend::TextureMailbox> mailbox;
 
 private:
-    void InitializeOpenGLObjects();
+    void InitializeOpenGLObjects(const Layout::FramebufferLayout& layout);
     void CleanupOpenGLObjects();
     void PresentLoop(std::stop_token stop_token);
 
 private:
     Core::System& system;
+    BackendGetter backend_getter;
     std::unique_ptr<Frontend::GraphicsContext> context;
     std::jthread present_thread;
 

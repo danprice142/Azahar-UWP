@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <mutex>
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_opengl/frame_dumper_opengl.h"
 #include "video_core/renderer_opengl/gl_driver.h"
@@ -25,18 +26,18 @@ namespace OpenGL {
 /// Structure used for storing information about the textures for each 3DS screen
 struct TextureInfo {
     OGLTexture resource;
-    u32 width;
-    u32 height;
-    Pica::PixelFormat format;
-    GLenum gl_format;
-    GLenum gl_type;
+    u32 width{};
+    u32 height{};
+    Pica::PixelFormat format{};
+    GLenum gl_format{};
+    GLenum gl_type{};
 };
 
 /// Structure used for storing information about the display target for each 3DS screen
 struct ScreenInfo {
-    GLuint display_texture;
-    Common::Rectangle<float> display_texcoords;
-    TextureInfo texture;
+    GLuint display_texture{};
+    Common::Rectangle<float> display_texcoords{};
+    TextureInfo texture{};
 };
 
 class RendererOpenGL : public VideoCore::RendererBase {
@@ -53,6 +54,8 @@ public:
     void TryPresent(int timeout_ms, bool is_secondary) override;
     void PrepareVideoDumping() override;
     void CleanupVideoDumping() override;
+    void StartAuxVideoDumping(std::shared_ptr<VideoDumper::Backend> backend) override;
+    void StopAuxVideoDumping() override;
 
 private:
     void InitOpenGLObjects();
@@ -60,7 +63,9 @@ private:
     void PrepareRendertarget();
     void RenderScreenshot();
     void RenderToMailbox(const Layout::FramebufferLayout& layout,
-                         std::unique_ptr<Frontend::TextureMailbox>& mailbox, bool flipped);
+                         std::unique_ptr<Frontend::TextureMailbox>& mailbox, bool flipped,
+                         bool presentation_uses_render_context,
+                         bool include_duplicate_frames = false);
     void ConfigureFramebufferTexture(TextureInfo& texture,
                                      const Pica::FramebufferConfig& framebuffer,
                                      const Pica::ColorFill& color_fill);
@@ -95,7 +100,7 @@ private:
     std::array<OGLSampler, 2> samplers;
 
     // Display information for top and bottom screens respectively
-    std::array<ScreenInfo, 3> screen_infos;
+    std::array<ScreenInfo, 3> screen_infos{};
 
     // Shader uniform location indices
     GLuint uniform_modelview_matrix;
@@ -112,6 +117,9 @@ private:
     GLuint attrib_tex_coord;
 
     FrameDumperOpenGL frame_dumper;
+    FrameDumperOpenGL aux_frame_dumper;
+    std::mutex aux_video_dumper_mutex;
+    std::shared_ptr<VideoDumper::Backend> aux_video_dumper;
     bool isSecondaryWindow;
     bool secondaryWindowEnabled;
 };

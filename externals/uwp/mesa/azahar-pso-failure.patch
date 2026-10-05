@@ -1,0 +1,64 @@
+diff --git a/src/gallium/drivers/d3d12/d3d12_draw.cpp b/src/gallium/drivers/d3d12/d3d12_draw.cpp
+index d9388c7..a089efc 100644
+--- a/src/gallium/drivers/d3d12/d3d12_draw.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_draw.cpp
+@@ -1037,7 +1037,13 @@ d3d12_draw_vbo(struct pipe_context *pctx,
+ 
+    if (!ctx->current_gfx_pso || ctx->state_dirty & D3D12_DIRTY_GFX_PSO) {
+       ctx->current_gfx_pso = d3d12_get_gfx_pipeline_state(ctx);
+-      assert(ctx->current_gfx_pso);
++      if (!ctx->current_gfx_pso) {
++         /* Skip a draw whose PSO the device rejected instead of terminating. */
++         if (dinfo->has_user_indices)
++            pipe_resource_reference(&index_buffer, NULL);
++         pipe_resource_reference(&patched_indirect.buffer, NULL);
++         return;
++      }
+    }
+ 
+    ctx->cmdlist_dirty |= ctx->state_dirty;
+diff --git a/src/gallium/drivers/d3d12/d3d12_pipeline_state.cpp b/src/gallium/drivers/d3d12/d3d12_pipeline_state.cpp
+index 7dab6a2..464d60f 100644
+--- a/src/gallium/drivers/d3d12/d3d12_pipeline_state.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_pipeline_state.cpp
+@@ -418,7 +418,7 @@ create_gfx_pipeline_state(struct d3d12_context *ctx)
+ 
+       if (FAILED(hr = screen->dev->CreatePipelineState(&pso_stream_desc,
+                                                        IID_PPV_ARGS(&ret)))) {
+-         std::_Exit(hr);
++         debug_printf("D3D12: CreatePipelineState failed: 0x%08x\n", (unsigned)hr);
+          return NULL;
+       }
+    } 
+@@ -426,7 +426,7 @@ create_gfx_pipeline_state(struct d3d12_context *ctx)
+       D3D12_GRAPHICS_PIPELINE_STATE_DESC v0desc = pso_desc.GraphicsDescV0();
+       if (FAILED(hr = screen->dev->CreateGraphicsPipelineState(&v0desc,
+                                                                IID_PPV_ARGS(&ret)))) {
+-         std::_Exit(hr);
++         debug_printf("D3D12: CreateGraphicsPipelineState failed: 0x%08x\n", (unsigned)hr);
+          return NULL;
+       }
+    }
+@@ -458,11 +458,8 @@ d3d12_get_gfx_pipeline_state(struct d3d12_context *ctx)
+          return NULL;
+ 
+       data->key = ctx->gfx_pipeline_state;
++      /* A failed PSO is cached as NULL so the same state is not recreated on every draw. */
+       data->pso = create_gfx_pipeline_state(ctx);
+-      if (!data->pso) {
+-         FREE(data);
+-         return NULL;
+-      }
+ 
+       entry = _mesa_hash_table_insert_pre_hashed(ctx->pso_cache, hash, &data->key, data);
+       assert(entry);
+@@ -481,7 +478,8 @@ static void
+ delete_gfx_entry(struct hash_entry *entry)
+ {
+    struct d3d12_gfx_pso_entry *data = (struct d3d12_gfx_pso_entry *)entry->data;
+-   data->pso->Release();
++   if (data->pso)
++      data->pso->Release();
+    FREE(data);
+ }
+ 

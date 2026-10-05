@@ -2,6 +2,7 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <algorithm>
 #include <span>
 #include <unordered_map>
 #include "common/assert.h"
@@ -79,35 +80,50 @@ void FFmpegStream::WritePacket(AVPacket* packet) {
     }
 }
 
-void FFmpegStream::SendFrame(AVFrame* frame) {
+bool FFmpegStream::SendFrame(AVFrame* frame) {
     // Initialize packet
     AVPacket* packet = av_packet_alloc();
     if (!packet) {
         LOG_ERROR(Render, "Frame dropped: av_packet_alloc failed");
+        return false;
     }
     SCOPE_EXIT({ av_packet_free(&packet); });
 
     packet->data = nullptr;
     packet->size = 0;
 
-    // Encode frame
-    if (avcodec_send_frame(codec_context.get(), frame) < 0) {
-        LOG_ERROR(Render, "Frame dropped: could not send frame");
-        return;
-    }
-    int error = 1;
-    while (error >= 0) {
-        error = avcodec_receive_packet(codec_context.get(), packet);
-        if (error == AVERROR(EAGAIN) || error == AVERROR_EOF)
-            return;
-        if (error < 0) {
-            LOG_ERROR(Render, "Frame dropped: could not encode audio");
-            return;
-        } else {
-            // Write frame to video file
-            WritePacket(packet);
+    const auto receive_packets = [&] {
+        int error = 1;
+        while (error >= 0) {
+            error = avcodec_receive_packet(codec_context.get(), packet);
+            if (error == AVERROR(EAGAIN) || error == AVERROR_EOF)
+                return;
+            if (error < 0) {
+                LOG_ERROR(Render, "Frame dropped: could not encode audio");
+                return;
+            } else {
+                // Write frame to video file
+                WritePacket(packet);
+            }
         }
+    };
+
+    // Encode frame
+    int sent = avcodec_send_frame(codec_context.get(), frame);
+    if (sent == AVERROR(EAGAIN)) {
+        // An asynchronous encoder still holds the previous frame; drain it and offer this one
+        // again.
+        receive_packets();
+        sent = avcodec_send_frame(codec_context.get(), frame);
     }
+    if (sent < 0) {
+        if (sent != AVERROR(EAGAIN)) {
+            LOG_ERROR(Render, "Frame dropped: could not send frame");
+        }
+        return false;
+    }
+    receive_packets();
+    return true;
 }
 
 FFmpegVideoStream::~FFmpegVideoStream() {
@@ -151,7 +167,8 @@ static AVPixelFormat GetPixelFormat(AVCodecContext* avctx, const AVPixelFormat* 
     return AV_PIX_FMT_NONE;
 }
 
-bool FFmpegVideoStream::Init(FFmpegMuxer& muxer, const Layout::FramebufferLayout& layout_) {
+bool FFmpegVideoStream::Init(FFmpegMuxer& muxer, const Layout::FramebufferLayout& layout_,
+                             u32 target_fps_, bool low_latency_) {
     InitializeFFmpegLibraries();
 
     if (!FFmpegStream::Init(muxer)) {
@@ -159,60 +176,24 @@ bool FFmpegVideoStream::Init(FFmpegMuxer& muxer, const Layout::FramebufferLayout
     }
 
     layout = layout_;
+    target_fps = std::clamp(target_fps_, 1U, 60U);
+    low_latency = low_latency_;
     frame_count = 0;
+    first_frame_pending = true;
+    next_keyframe_pts = 0;
 
     // Initialize video codec
-    const AVCodec* codec = avcodec_find_encoder_by_name(Settings::values.video_encoder.c_str());
-    codec_context.reset(avcodec_alloc_context3(codec));
-    if (!codec || !codec_context) {
-        LOG_ERROR(Render, "Could not find video encoder or allocate video codec context");
+    codec = avcodec_find_encoder_by_name(Settings::values.video_encoder.c_str());
+    if (!codec) {
+        LOG_ERROR(Render, "Could not find video encoder {}", Settings::values.video_encoder);
         return false;
     }
+    const std::string_view encoder_name{Settings::values.video_encoder};
+    mf_streaming = low_latency && (encoder_name == "h264_mf" || encoder_name == "hevc_mf");
 
-    // Configure video codec context
-    codec_context->codec_type = AVMEDIA_TYPE_VIDEO;
-    codec_context->bit_rate = Settings::values.video_bitrate;
-    codec_context->width = layout.width;
-    codec_context->height = layout.height;
-    // Use 60fps here, since the video is already filtered (resampled)
-    codec_context->time_base.num = 1;
-    codec_context->time_base.den = 60;
-    codec_context->gop_size = 12;
-
-    // Get pixel format for codec
-    auto options = ToAVDictionary(Settings::values.video_encoder_options);
-    auto pixel_format_opt = av_dict_get(options, "pixel_format", nullptr, 0);
-    if (pixel_format_opt) {
-        sw_pixel_format = av_get_pix_fmt(pixel_format_opt->value);
-    } else if (codec->pix_fmts) {
-        sw_pixel_format = GetPixelFormat(codec_context.get(), codec->pix_fmts);
-    } else {
-        sw_pixel_format = AV_PIX_FMT_YUV420P;
-    }
-    if (sw_pixel_format == AV_PIX_FMT_NONE) {
-        // This encoder requires HW context configuration.
-        if (!InitHWContext(codec)) {
-            LOG_ERROR(Render, "Failed to initialize HW context");
-            return false;
-        }
-    } else {
-        requires_hw_frames = false;
-        codec_context->pix_fmt = sw_pixel_format;
-    }
-
-    if (format_context->oformat->flags & AVFMT_GLOBALHEADER) {
-        codec_context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    }
-
-    if (avcodec_open2(codec_context.get(), codec, &options) < 0) {
-        LOG_ERROR(Render, "Could not open video codec");
+    // Media Foundation defaults to its software transform; a stream tries the hardware one first.
+    if (!OpenCodec(mf_streaming) && !(mf_streaming && OpenCodec(false))) {
         return false;
-    }
-
-    if (av_dict_count(options) != 0) { // Successfully set options are removed from the dict
-        char* buf = nullptr;
-        av_dict_get_string(options, &buf, ':', ';');
-        LOG_WARNING(Render, "Video encoder options not found: {}", buf);
     }
 
     // Create video stream
@@ -250,6 +231,95 @@ void FFmpegVideoStream::Free() {
     sink_context = nullptr;
 }
 
+bool FFmpegVideoStream::OpenCodec(bool hardware) {
+    codec_context.reset(avcodec_alloc_context3(codec));
+    if (!codec_context) {
+        LOG_ERROR(Render, "Could not allocate video codec context");
+        return false;
+    }
+
+    // Configure video codec context
+    codec_context->codec_type = AVMEDIA_TYPE_VIDEO;
+    codec_context->bit_rate = Settings::values.video_bitrate;
+    codec_context->width = layout.width;
+    codec_context->height = layout.height;
+    // The filter below resamples the emulated frame cadence to this stream's requested rate.
+    codec_context->time_base.num = 1;
+    codec_context->time_base.den = static_cast<int>(target_fps);
+    codec_context->gop_size = low_latency ? std::max(1, static_cast<int>(target_fps / 2)) : 12;
+    if (low_latency) {
+        codec_context->max_b_frames = 0;
+        codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    }
+    if (mf_streaming) {
+        codec_context->framerate = AVRational{static_cast<int>(target_fps), 1};
+        if (codec->id == AV_CODEC_ID_H264) {
+            codec_context->profile = FF_PROFILE_H264_BASELINE;
+        }
+    }
+
+    // Get pixel format for codec
+    auto options = ToAVDictionary(Settings::values.video_encoder_options);
+    if (low_latency) {
+        const std::string_view encoder_name{Settings::values.video_encoder};
+        if (encoder_name == "h264_mf" || encoder_name == "hevc_mf") {
+            // Media Foundation exposes rate-control hints as private encoder options; user options
+            // take precedence.
+            av_dict_set(&options, "rate_control", "cbr", AV_DICT_DONT_OVERWRITE);
+            av_dict_set(&options, "scenario", "live_streaming", AV_DICT_DONT_OVERWRITE);
+            av_dict_set(&options, "hw_encoding", hardware ? "1" : "0", AV_DICT_DONT_OVERWRITE);
+        } else if (encoder_name == "libx264") {
+            av_dict_set(&options, "tune", "zerolatency", AV_DICT_DONT_OVERWRITE);
+        }
+    }
+    const AVDictionaryEntry* hw_option = av_dict_get(options, "hw_encoding", nullptr, 0);
+    hardware_encoding = hw_option && (std::string_view{hw_option->value} == "1" ||
+                                      std::string_view{hw_option->value} == "true");
+    auto pixel_format_opt = av_dict_get(options, "pixel_format", nullptr, 0);
+    if (pixel_format_opt) {
+        sw_pixel_format = av_get_pix_fmt(pixel_format_opt->value);
+    } else if (mf_streaming) {
+        // The hardware transform takes NV12; the software one accepts it as well.
+        sw_pixel_format = AV_PIX_FMT_NV12;
+    } else if (codec->pix_fmts) {
+        sw_pixel_format = GetPixelFormat(codec_context.get(), codec->pix_fmts);
+    } else {
+        sw_pixel_format = AV_PIX_FMT_YUV420P;
+    }
+    if (sw_pixel_format == AV_PIX_FMT_NONE) {
+        // This encoder requires HW context configuration.
+        if (!InitHWContext(codec)) {
+            LOG_ERROR(Render, "Failed to initialize HW context");
+            return false;
+        }
+    } else {
+        requires_hw_frames = false;
+        codec_context->pix_fmt = sw_pixel_format;
+    }
+
+    if (format_context->oformat->flags & AVFMT_GLOBALHEADER) {
+        codec_context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
+
+    if (avcodec_open2(codec_context.get(), codec, &options) < 0) {
+        LOG_ERROR(Render, "Could not open {} video codec",
+                  hardware_encoding ? "hardware" : "software");
+        return false;
+    }
+
+    if (av_dict_count(options) != 0) { // Successfully set options are removed from the dict
+        char* buf = nullptr;
+        av_dict_get_string(options, &buf, ':', ';');
+        LOG_WARNING(Render, "Video encoder options not found: {}", buf);
+    }
+    if (mf_streaming) {
+        LOG_INFO(Render, "Streaming encoder: {} {} {}x{} {} fps {} kbps",
+                 Settings::values.video_encoder, hardware_encoding ? "hardware" : "software",
+                 layout.width, layout.height, target_fps, Settings::values.video_bitrate / 1000);
+    }
+    return true;
+}
+
 void FFmpegVideoStream::ProcessFrame(VideoFrame& frame) {
     if (frame.width != layout.width || frame.height != layout.height) {
         LOG_ERROR(Render, "Frame dropped: resolution does not match");
@@ -284,7 +354,29 @@ void FFmpegVideoStream::ProcessFrame(VideoFrame& frame) {
                 }
                 SendFrame(hw_frame.get());
             } else {
-                SendFrame(filtered_frame.get());
+                if (mf_streaming) {
+                    // MF ignores gop_size and needs a nonzero sample duration; periodic I-frames
+                    // let a UDP receiver recover or join midstream.
+                    filtered_frame->duration = 1;
+                    filtered_frame->pict_type = filtered_frame->pts >= next_keyframe_pts
+                                                    ? AV_PICTURE_TYPE_I
+                                                    : AV_PICTURE_TYPE_NONE;
+                }
+                bool sent = SendFrame(filtered_frame.get());
+                if (!sent && first_frame_pending && hardware_encoding) {
+                    LOG_WARNING(Render,
+                                "Hardware encoder rejected its first frame, using software");
+                    if (OpenCodec(false) && avcodec_parameters_from_context(
+                                                stream->codecpar, codec_context.get()) >= 0) {
+                        sent = SendFrame(filtered_frame.get());
+                    }
+                }
+                if (sent) {
+                    first_frame_pending = false;
+                    if (mf_streaming && filtered_frame->pict_type == AV_PICTURE_TYPE_I) {
+                        next_keyframe_pts = filtered_frame->pts + static_cast<s64>(target_fps);
+                    }
+                }
             }
 
             av_frame_unref(filtered_frame.get());
@@ -438,7 +530,8 @@ bool FFmpegVideoStream::InitFilters() {
         avfilter_inout_free(&inputs);
     });
 
-    if (avfilter_graph_parse_ptr(filter_graph.get(), filter_graph_desc.data(), &inputs, &outputs,
+    const std::string filter_graph_desc = fmt::format("fps={}", target_fps);
+    if (avfilter_graph_parse_ptr(filter_graph.get(), filter_graph_desc.c_str(), &inputs, &outputs,
                                  nullptr) < 0) {
         LOG_ERROR(Render, "Could not parse or create filter graph");
         return false;
@@ -455,7 +548,7 @@ FFmpegAudioStream::~FFmpegAudioStream() {
     Free();
 }
 
-bool FFmpegAudioStream::Init(FFmpegMuxer& muxer) {
+bool FFmpegAudioStream::Init(FFmpegMuxer& muxer, bool streaming) {
     InitializeFFmpegLibraries();
 
     if (!FFmpegStream::Init(muxer)) {
@@ -483,11 +576,13 @@ bool FFmpegAudioStream::Init(FFmpegMuxer& muxer) {
 
     if (codec->supported_samplerates) {
         codec_context->sample_rate = codec->supported_samplerates[0];
-        // Prefer native sample rate if supported
+        // Network streams use 48 kHz; some hardware decoders fail on the encoder's first-listed
+        // 96 kHz.
+        const int preferred_sample_rate = streaming ? 48'000 : AudioCore::native_sample_rate;
         const int* ptr = codec->supported_samplerates;
         while ((*ptr)) {
-            if ((*ptr) == AudioCore::native_sample_rate) {
-                codec_context->sample_rate = AudioCore::native_sample_rate;
+            if ((*ptr) == preferred_sample_rate) {
+                codec_context->sample_rate = preferred_sample_rate;
                 break;
             }
             ptr++;
@@ -532,6 +627,9 @@ bool FFmpegAudioStream::Init(FFmpegMuxer& muxer) {
         LOG_ERROR(Render, "Could not create audio stream");
         return false;
     }
+    stream->time_base = codec_context->time_base;
+    LOG_INFO(Render, "Audio dumping configured at {} Hz, {} channels", codec_context->sample_rate,
+             2);
 
     // Allocate frame
     audio_frame.reset(av_frame_alloc());
@@ -660,15 +758,18 @@ FFmpegMuxer::~FFmpegMuxer() {
     Free();
 }
 
-bool FFmpegMuxer::Init(const std::string& path, const Layout::FramebufferLayout& layout) {
+bool FFmpegMuxer::Init(const std::string& path, const Layout::FramebufferLayout& layout,
+                       bool enable_audio, u32 target_fps, bool low_latency) {
     InitializeFFmpegLibraries();
 
-    if (!FileUtil::CreateFullPath(path)) {
+    const bool network_output = path.starts_with("udp://");
+    const bool use_low_latency = network_output || low_latency;
+    if (!network_output && !FileUtil::CreateFullPath(path)) {
         return false;
     }
 
     // Get output format
-    const auto format = Settings::values.output_format;
+    const auto format = network_output ? std::string{"mpegts"} : Settings::values.output_format;
     auto* output_format = av_guess_format(format.c_str(), path.c_str(), nullptr);
     if (!output_format) {
         LOG_ERROR(Render, "Could not get format {}", format);
@@ -683,10 +784,14 @@ bool FFmpegMuxer::Init(const std::string& path, const Layout::FramebufferLayout&
         return false;
     }
     format_context.reset(format_context_raw);
+    if (use_low_latency) {
+        format_context->flags |= AVFMT_FLAG_FLUSH_PACKETS;
+    }
 
-    if (!video_stream.Init(*this, layout))
+    if (!video_stream.Init(*this, layout, target_fps, use_low_latency))
         return false;
-    if (!audio_stream.Init(*this))
+    audio_enabled = enable_audio;
+    if (audio_enabled && !audio_stream.Init(*this, use_low_latency))
         return false;
 
     AVDictionary* options = ToAVDictionary(Settings::values.format_options);
@@ -719,7 +824,8 @@ void FFmpegMuxer::ProcessVideoFrame(VideoFrame& frame) {
 
 void FFmpegMuxer::ProcessAudioFrame(const VariableAudioFrame& channel0,
                                     const VariableAudioFrame& channel1) {
-    audio_stream.ProcessFrame(channel0, channel1);
+    if (audio_enabled)
+        audio_stream.ProcessFrame(channel0, channel1);
 }
 
 void FFmpegMuxer::FlushVideo() {
@@ -727,7 +833,8 @@ void FFmpegMuxer::FlushVideo() {
 }
 
 void FFmpegMuxer::FlushAudio() {
-    audio_stream.Flush();
+    if (audio_enabled)
+        audio_stream.Flush();
 }
 
 void FFmpegMuxer::WriteTrailer() {
@@ -736,7 +843,15 @@ void FFmpegMuxer::WriteTrailer() {
     av_write_trailer(format_context.get());
 }
 
-FFmpegBackend::FFmpegBackend(VideoCore::RendererBase& renderer_) : renderer{renderer_} {}
+FFmpegBackend::FFmpegBackend(VideoCore::RendererBase& renderer_, bool manage_renderer_capture_,
+                             bool video_only_)
+    : FFmpegBackend(renderer_,
+                    FFmpegBackendConfig{manage_renderer_capture_, !video_only_, 60, false}) {}
+
+FFmpegBackend::FFmpegBackend(VideoCore::RendererBase& renderer_, FFmpegBackendConfig config)
+    : renderer{renderer_}, manage_renderer_capture{config.manage_renderer_capture},
+      audio_enabled{config.audio_enabled}, target_fps{std::clamp(config.target_fps, 1U, 60U)},
+      low_latency{config.low_latency} {}
 
 FFmpegBackend::~FFmpegBackend() {
     ASSERT_MSG(!IsDumping(), "Dumping must be stopped first");
@@ -751,7 +866,7 @@ FFmpegBackend::~FFmpegBackend() {
 bool FFmpegBackend::StartDumping(const std::string& path, const Layout::FramebufferLayout& layout) {
     InitializeFFmpegLibraries();
 
-    if (!ffmpeg.Init(path, layout)) {
+    if (!ffmpeg.Init(path, layout, audio_enabled, target_fps, low_latency)) {
         ffmpeg.Free();
         return false;
     }
@@ -761,6 +876,34 @@ bool FFmpegBackend::StartDumping(const std::string& path, const Layout::Framebuf
     if (video_processing_thread.joinable()) {
         video_processing_thread.join();
     }
+    if (audio_processing_thread.joinable()) {
+        audio_processing_thread.join();
+    }
+    event1.Reset();
+    event2.Reset();
+    processing_ended.Reset();
+    current_buffer = 0;
+    next_buffer = 1;
+    for (auto& queue : audio_frame_queues) {
+        queue.Clear();
+    }
+
+    if (audio_enabled) {
+        audio_processing_thread = std::thread([&] {
+            VariableAudioFrame channel0, channel1;
+            while (true) {
+                channel0 = audio_frame_queues[0].PopWait();
+                channel1 = audio_frame_queues[1].PopWait();
+                if (channel0.empty()) {
+                    // An empty frame marks the end of frame data
+                    ffmpeg.FlushAudio();
+                    break;
+                }
+                ffmpeg.ProcessAudioFrame(channel0, channel1);
+            }
+        });
+    }
+
     video_processing_thread = std::thread([&] {
         event1.Set();
         while (true) {
@@ -783,24 +926,8 @@ bool FFmpegBackend::StartDumping(const std::string& path, const Layout::Framebuf
         EndDumping();
     });
 
-    if (audio_processing_thread.joinable()) {
-        audio_processing_thread.join();
-    }
-    audio_processing_thread = std::thread([&] {
-        VariableAudioFrame channel0, channel1;
-        while (true) {
-            channel0 = audio_frame_queues[0].PopWait();
-            channel1 = audio_frame_queues[1].PopWait();
-            if (channel0.empty()) {
-                // An empty frame marks the end of frame data
-                ffmpeg.FlushAudio();
-                break;
-            }
-            ffmpeg.ProcessAudioFrame(channel0, channel1);
-        }
-    });
-
-    renderer.PrepareVideoDumping();
+    if (manage_renderer_capture)
+        renderer.PrepareVideoDumping();
     is_dumping = true;
 
     return true;
@@ -813,6 +940,11 @@ void FFmpegBackend::AddVideoFrame(VideoFrame frame) {
 }
 
 void FFmpegBackend::AddAudioFrame(AudioCore::StereoFrame16 frame) {
+    if (!audio_enabled)
+        return;
+    std::scoped_lock lock{audio_submission_mutex};
+    if (!IsDumping())
+        return;
     std::array<VariableAudioFrame, 2> refactored_frame;
     for (auto& channel : refactored_frame) {
         channel.resize(frame.size());
@@ -827,19 +959,28 @@ void FFmpegBackend::AddAudioFrame(AudioCore::StereoFrame16 frame) {
 }
 
 void FFmpegBackend::AddAudioSample(const std::array<s16, 2>& sample) {
+    if (!audio_enabled)
+        return;
+    std::scoped_lock lock{audio_submission_mutex};
+    if (!IsDumping())
+        return;
     audio_frame_queues[0].Push(VariableAudioFrame{sample[0]});
     audio_frame_queues[1].Push(VariableAudioFrame{sample[1]});
 }
 
 void FFmpegBackend::StopDumping() {
     is_dumping = false;
-    renderer.CleanupVideoDumping();
+    if (manage_renderer_capture)
+        renderer.CleanupVideoDumping();
 
     // Flush the video processing queue
     AddVideoFrame(VideoFrame());
-    for (auto i : {0, 1}) {
-        // Flush the audio processing queue
-        audio_frame_queues[i].Push(VariableAudioFrame());
+    if (audio_enabled) {
+        std::scoped_lock lock{audio_submission_mutex};
+        for (auto i : {0, 1}) {
+            // Flush the audio processing queue
+            audio_frame_queues[i].Push(VariableAudioFrame());
+        }
     }
     // Wait until processing ends
     processing_ended.Wait();

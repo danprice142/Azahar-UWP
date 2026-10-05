@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -171,9 +172,7 @@ public:
     }
 
     /// Request shutdown of the system
-    void RequestShutdown() {
-        SendSignal(Signal::Shutdown);
-    }
+    void RequestShutdown();
 
     /**
      * Load an executable application.
@@ -318,10 +317,11 @@ public:
     /// Video Dumper interface
 
     void RegisterVideoDumper(std::shared_ptr<VideoDumper::Backend> video_dumper);
+    void RegisterAuxVideoDumper(std::shared_ptr<VideoDumper::Backend> video_dumper);
 
-    [[nodiscard]] std::shared_ptr<VideoDumper::Backend> GetVideoDumper() const {
-        return video_dumper;
-    }
+    [[nodiscard]] std::shared_ptr<VideoDumper::Backend> GetVideoDumper() const;
+    [[nodiscard]] std::shared_ptr<VideoDumper::Backend> GetAuxVideoDumper() const;
+    [[nodiscard]] std::array<std::shared_ptr<VideoDumper::Backend>, 2> GetVideoDumpers() const;
 
     std::unique_ptr<PerfStats> perf_stats;
     FrameLimiter frame_limiter;
@@ -509,7 +509,9 @@ private:
     Cheats::CheatEngine cheat_engine;
 
     /// Video dumper backend
+    mutable std::mutex video_dumper_mutex;
     std::shared_ptr<VideoDumper::Backend> video_dumper;
+    std::shared_ptr<VideoDumper::Backend> aux_video_dumper;
 
     /// Custom texture cache system
     std::unique_ptr<VideoCore::CustomTexManager> custom_tex_manager;

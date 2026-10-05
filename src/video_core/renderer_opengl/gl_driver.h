@@ -21,7 +21,9 @@ enum class Vendor {
     ARM = 4,
     Qualcomm = 5,
     Samsung = 6,
-    Generic = 7,
+    Microsoft = 7,
+    Mesa = 8,
+    Generic = 9,
 };
 
 enum class DriverBug {

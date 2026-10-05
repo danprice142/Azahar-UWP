@@ -1,0 +1,77 @@
+diff --git a/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_uwp.cpp b/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_uwp.cpp
+index be5a43c7..2d1d5427 100644
+--- a/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_uwp.cpp
++++ b/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_uwp.cpp
+@@ -55,6 +55,7 @@ struct d3d12_wgl_framebuffer {
+    enum pipe_format pformat;
+    HWND window;
+    ComPtr<IDXGISwapChain3> swapchain;
++   HANDLE frame_latency_waitable_object = nullptr;
+    ID3D12Resource *images[num_buffers];
+    pipe_resource *buffers[num_buffers];
+ };
+@@ -142,6 +143,11 @@ d3d12_wgl_framebuffer_destroy(struct stw_winsys_framebuffer *fb,
+ 
+    d3d12_wgl_framebuffer_release_buffers(framebuffer);
+ 
++   if (framebuffer->frame_latency_waitable_object) {
++      CloseHandle(framebuffer->frame_latency_waitable_object);
++      framebuffer->frame_latency_waitable_object = nullptr;
++   }
++
+    delete framebuffer;
+ }
+ 
+@@ -156,7 +162,8 @@ d3d12_wgl_framebuffer_resize(stw_winsys_framebuffer *fb,
+    DXGI_SWAP_CHAIN_DESC1 desc = {};
+    desc.BufferCount = num_buffers;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT;
+-   desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
++   desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
++                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    desc.Format = d3d12_get_format(templ->format);
+    desc.Width = templ->width0;
+    desc.Height = templ->height0;
+@@ -178,6 +185,20 @@ d3d12_wgl_framebuffer_resize(stw_winsys_framebuffer *fb,
+       }
+ 
+       swapchain1.As(&framebuffer->swapchain);
++      if (!framebuffer->swapchain ||
++          FAILED(framebuffer->swapchain->SetMaximumFrameLatency(1))) {
++         debug_printf("D3D12: failed to enable one-frame swapchain latency");
++         framebuffer->swapchain.Reset();
++         return;
++      }
++
++      framebuffer->frame_latency_waitable_object =
++         framebuffer->swapchain->GetFrameLatencyWaitableObject();
++      if (!framebuffer->frame_latency_waitable_object) {
++         debug_printf("D3D12: failed to get frame latency waitable object");
++         framebuffer->swapchain.Reset();
++         return;
++      }
+ 
+ #ifdef UWP_HDR
+       ComPtr<IDXGISwapChain4> swap_chain4;
+@@ -217,10 +238,17 @@ d3d12_wgl_framebuffer_present(stw_winsys_framebuffer *fb, int interval)
+       return false;
+    }
+ 
+-   if (interval < 1)
+-      return S_OK == framebuffer->swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+-   else
+-      return S_OK == framebuffer->swapchain->Present(interval, 0);
++   const HRESULT result = interval < 1
++      ? framebuffer->swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING)
++      : framebuffer->swapchain->Present(interval, 0);
++   if (FAILED(result))
++      return false;
++
++   // Wait after submitting this frame so the next WGL frame starts only when DXGI has room for
++   // it. This is equivalent to waiting before the next render and prevents the CPU from building
++   // a stale Present queue behind VSync.
++   return WaitForSingleObject(framebuffer->frame_latency_waitable_object, INFINITE) ==
++          WAIT_OBJECT_0;
+ }
+ 
+ static struct pipe_resource *

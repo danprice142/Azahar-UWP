@@ -286,7 +286,7 @@ Loader::ResultStatus NCCHContainer::Load() {
             }
 
             const auto mods_path =
-                fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
+                fmt::format("{}{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::ModsDir),
                             GetModId(ncch_header.program_id));
             const std::array<std::string, 2> exheader_override_paths{{
                 mods_path + "exheader.bin",
@@ -511,7 +511,7 @@ Loader::ResultStatus NCCHContainer::ApplyCodePatch(std::vector<u8>& code) const 
     };
 
     const auto mods_path =
-        fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
+        fmt::format("{}{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::ModsDir),
                     GetModId(ncch_header.program_id));
 
     constexpr u32 system_module_tid_high = 0x00040130;
@@ -573,7 +573,7 @@ Loader::ResultStatus NCCHContainer::LoadOverrideExeFSSection(const char* name,
         return Loader::ResultStatus::Error;
 
     const auto mods_path =
-        fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
+        fmt::format("{}{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::ModsDir),
                     GetModId(ncch_header.program_id));
     const std::array<std::string, 3> override_paths{{
         mods_path + "exefs/" + override_name,
@@ -637,9 +637,8 @@ Loader::ResultStatus NCCHContainer::ReadRomFS(std::shared_ptr<RomFSReader>& romf
         std::make_shared<DirectRomFSReader>(std::make_unique<FileUtil::SubIOFile>(
             std::move(romfs_file_inner), romfs_offset, romfs_size));
 
-    const auto path =
-        fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
-                    GetModId(ncch_header.program_id));
+    const auto path = fmt::format("{}{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::ModsDir),
+                                  GetModId(ncch_header.program_id));
     if (!is_proto && use_layered_fs &&
         (FileUtil::Exists(path + "romfs/") || FileUtil::Exists(path + "romfs_ext/"))) {
 

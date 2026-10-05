@@ -6,6 +6,8 @@
 // Licensed under GPLv2 or any later version
 // Refer to the misc/licenses/gplv2.txt file included.
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <fmt/format.h>
 
@@ -41,6 +43,56 @@ ShaderCacheVersionHash GetShaderCacheVersionHash() {
     const std::size_t length = std::min(std::strlen(Common::g_shader_cache_version), hash.size());
     std::memcpy(hash.data(), Common::g_shader_cache_version, length);
     return hash;
+}
+
+static std::optional<ShaderDiskCacheDump> ReadProgramBinary(GLuint program) {
+    GLint binary_length{};
+    glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &binary_length);
+    if (binary_length <= 0) {
+        static std::atomic_bool warned{};
+        if (!warned.exchange(true)) {
+            LOG_WARNING(Render_OpenGL,
+                        "Driver returned no retrievable program binary; retaining the GLSL cache "
+                        "without an unusable binary entry");
+        }
+        return std::nullopt;
+    }
+
+    GLint num_formats{};
+    glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &num_formats);
+    if (num_formats <= 0) {
+        static std::atomic_bool warned{};
+        if (!warned.exchange(true)) {
+            LOG_WARNING(Render_OpenGL,
+                        "Driver advertises no program-binary formats; retaining the GLSL cache "
+                        "without an unusable binary entry");
+        }
+        return std::nullopt;
+    }
+
+    std::vector<GLint> formats(static_cast<std::size_t>(num_formats));
+    glGetIntegerv(GL_PROGRAM_BINARY_FORMATS, formats.data());
+
+    ShaderDiskCacheDump dump;
+    dump.binary.resize(static_cast<std::size_t>(binary_length));
+    GLsizei written{};
+    glGetProgramBinary(program, binary_length, &written, &dump.binary_format, dump.binary.data());
+    if (written <= 0 || dump.binary_format == 0 ||
+        std::find(formats.begin(), formats.end(), static_cast<GLint>(dump.binary_format)) ==
+            formats.end()) {
+        static std::atomic_bool warned{};
+        if (!warned.exchange(true)) {
+            LOG_WARNING(
+                Render_OpenGL,
+                "Driver produced unusable program binary (format {:#x}, size {}); retaining "
+                "the GLSL cache without that binary entry",
+                dump.binary_format, written);
+        }
+        return std::nullopt;
+    }
+
+    dump.binary.resize(static_cast<std::size_t>(written));
+    return dump;
 }
 
 ShaderDiskCacheRaw::ShaderDiskCacheRaw(u64 unique_identifier, ProgramType program_type,
@@ -398,18 +450,16 @@ void ShaderDiskCache::SaveDump(u64 unique_identifier, GLuint program) {
     if (!IsUsable())
         return;
 
-    GLint binary_length{};
-    glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &binary_length);
-
-    GLenum binary_format{};
-    std::vector<u8> binary(binary_length);
-    glGetProgramBinary(program, binary_length, nullptr, &binary_format, binary.data());
+    const auto dump = ReadProgramBinary(program);
+    if (!dump) {
+        return;
+    }
 
     if (!SaveObjectToPrecompiled(static_cast<u32>(PrecompiledEntryKind::Dump)) ||
         !SaveObjectToPrecompiled(unique_identifier) ||
-        !SaveObjectToPrecompiled(static_cast<u32>(binary_format)) ||
-        !SaveObjectToPrecompiled(static_cast<u32>(binary_length)) ||
-        !SaveArrayToPrecompiled(binary.data(), binary.size())) {
+        !SaveObjectToPrecompiled(static_cast<u32>(dump->binary_format)) ||
+        !SaveObjectToPrecompiled(static_cast<u32>(dump->binary.size())) ||
+        !SaveArrayToPrecompiled(dump->binary.data(), dump->binary.size())) {
         LOG_ERROR(Render_OpenGL, "Failed to save binary program file in shader={:016x} - removing",
                   unique_identifier);
         InvalidatePrecompiled();
@@ -421,18 +471,17 @@ void ShaderDiskCache::SaveDumpToFile(u64 unique_identifier, GLuint program, bool
     if (!IsUsable())
         return;
 
-    GLint binary_length{};
-    glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &binary_length);
-
-    GLenum binary_format{};
-    std::vector<u8> binary(binary_length);
-    glGetProgramBinary(program, binary_length, nullptr, &binary_format, binary.data());
+    const auto dump = ReadProgramBinary(program);
+    if (!dump) {
+        return;
+    }
 
     if (precompiled_file.WriteObject(static_cast<u32>(PrecompiledEntryKind::Dump)) != 1 ||
         precompiled_file.WriteObject(unique_identifier) != 1 ||
-        precompiled_file.WriteObject(static_cast<u32>(binary_format)) != 1 ||
-        precompiled_file.WriteObject(static_cast<u32>(binary_length)) != 1 ||
-        precompiled_file.WriteArray(binary.data(), binary.size()) != binary.size()) {
+        precompiled_file.WriteObject(static_cast<u32>(dump->binary_format)) != 1 ||
+        precompiled_file.WriteObject(static_cast<u32>(dump->binary.size())) != 1 ||
+        precompiled_file.WriteArray(dump->binary.data(), dump->binary.size()) !=
+            dump->binary.size()) {
         LOG_ERROR(Render_OpenGL, "Failed to save binary program file in shader={:016x} - removing",
                   unique_identifier);
         InvalidatePrecompiled();

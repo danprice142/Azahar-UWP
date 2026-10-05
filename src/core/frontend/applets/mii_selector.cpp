@@ -13,6 +13,7 @@ namespace Frontend {
 
 void MiiSelector::Finalize(u32 return_code, Mii::MiiData mii) {
     data = {return_code, mii};
+    data_ready.store(true, std::memory_order_release);
 }
 
 std::vector<Mii::MiiData> LoadMiis() {

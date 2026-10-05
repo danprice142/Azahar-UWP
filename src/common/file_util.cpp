@@ -33,10 +33,16 @@
 #include <direct.h> // getcwd
 #include <io.h>
 #include <share.h>
-#include <shellapi.h>
-#include <shlobj.h> // for SHGetFolderPath
 #include <tchar.h>
 #include "common/string_util.h"
+#if defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_APP
+#include <appmodel.h> // GetCurrentPackageFamilyName
+// Redirects CreateFileW and friends onto their app-container-safe equivalents.
+#include "uwp/compat/uwp_compat.h"
+#else
+#include <shellapi.h>
+#include <shlobj.h> // for SHGetFolderPath
+#endif
 
 #ifdef _MSC_VER
 // 64 bit offsets for MSVC
@@ -863,6 +869,32 @@ const std::string& GetExeDirectory() {
     return exe_path;
 }
 
+#if defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_APP
+std::string AppDataRoamingDirectory() {
+    // App containers use package LocalState; return empty when the environment is unavailable.
+    UINT32 family_name_length = 0;
+    if (GetCurrentPackageFamilyName(&family_name_length, nullptr) != ERROR_INSUFFICIENT_BUFFER) {
+        return {};
+    }
+
+    std::wstring family_name(family_name_length, L'\0');
+    if (GetCurrentPackageFamilyName(&family_name_length, family_name.data()) != ERROR_SUCCESS) {
+        return {};
+    }
+    // GetCurrentPackageFamilyName counts the null terminator; drop it.
+    family_name.resize(family_name_length - 1);
+
+    std::wstring local_app_data(MAX_PATH, L'\0');
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app_data.data(), MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        return {};
+    }
+    local_app_data.resize(length);
+
+    return Common::UTF16ToUTF8(local_app_data) + "\\Packages\\" + Common::UTF16ToUTF8(family_name) +
+           "\\LocalState";
+}
+#else
 std::string AppDataRoamingDirectory() {
     PWSTR path = nullptr;
 
@@ -875,6 +907,7 @@ std::string AppDataRoamingDirectory() {
     CoTaskMemFree(path);
     return result;
 }
+#endif
 #else
 /**
  * @return The user’s home directory on POSIX systems
@@ -1030,6 +1063,7 @@ void SetUserPath(const std::string& path) {
     g_paths.emplace(UserPath::ShaderDir, user_path + SHADER_DIR DIR_SEP);
     g_paths.emplace(UserPath::DumpDir, user_path + DUMP_DIR DIR_SEP);
     g_paths.emplace(UserPath::LoadDir, user_path + LOAD_DIR DIR_SEP);
+    g_paths.emplace(UserPath::ModsDir, user_path + LOAD_DIR DIR_SEP "mods" DIR_SEP);
     g_paths.emplace(UserPath::StatesDir, user_path + STATES_DIR DIR_SEP);
     g_paths.emplace(UserPath::IconsDir, user_path + ICONS_DIR DIR_SEP);
     g_default_paths = g_paths;

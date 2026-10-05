@@ -480,6 +480,9 @@ struct Values {
     std::vector<TouchFromButtonMap> touch_from_button_maps;
     Setting<bool> use_artic_base_controller{false, Keys::use_artic_base_controller};
 
+    /// Runtime-only frontend policy used by UWP's right-stick touchscreen mode.
+    Setting<bool> c_stick_touchscreen_only{false, "c_stick_touchscreen_only"};
+
     SwitchableSetting<bool> enable_gamemode{true, Keys::enable_gamemode};
 
     // Core

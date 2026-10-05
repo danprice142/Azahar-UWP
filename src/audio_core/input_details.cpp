@@ -15,6 +15,9 @@
 #ifdef HAVE_OPENAL
 #include "audio_core/openal_input.h"
 #endif
+#ifdef HAVE_SDL2
+#include "audio_core/sdl2_input.h"
+#endif
 #ifdef HAVE_LIBRETRO
 #include "audio_core/libretro_input.h"
 #endif
@@ -60,6 +63,18 @@ constexpr std::array input_details = {
                      return std::make_unique<OpenALInput>(std::string(device_id));
                  },
                  &ListOpenALInputDevices},
+#endif
+#ifdef HAVE_SDL2
+    InputDetails{InputType::SDL2, "Real Device (SDL2)", true,
+                 [](Core::System& system, std::string_view device_id) -> std::unique_ptr<Input> {
+                     if (!system.HasMicPermission()) {
+                         LOG_WARNING(Audio,
+                                     "Microphone permission denied, falling back to null input.");
+                         return std::make_unique<NullInput>();
+                     }
+                     return std::make_unique<SDL2Input>(std::string(device_id));
+                 },
+                 &ListSDL2InputDevices},
 #endif
     InputDetails{InputType::Static, "Static Noise", false,
                  [](Core::System& system, std::string_view device_id) -> std::unique_ptr<Input> {

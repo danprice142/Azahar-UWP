@@ -262,6 +262,10 @@ void ExtraHID::SendHIDStatus() {
     } else {
         float x, y;
         std::tie(x, y) = c_stick->GetStatus();
+        if (Settings::values.c_stick_touchscreen_only.GetValue()) {
+            x = 0.0f;
+            y = 0.0f;
+        }
 
         response.c_stick.header.Assign(static_cast<u8>(ResponseID::PollHID));
         response.c_stick.c_stick_x.Assign(static_cast<u32>(C_STICK_CENTER + C_STICK_RADIUS * x));

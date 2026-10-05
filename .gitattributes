@@ -2,3 +2,5 @@ dist/languages/* linguist-vendored
 dist/qt_themes/* linguist-vendored
 externals/* linguist-vendored
 *.h linguist-language=cpp
+*.patch whitespace=-blank-at-eol
+/externals/uwp/mesa/licenses/** whitespace=-blank-at-eof,-tab-in-indent
