@@ -84,7 +84,7 @@ static bool ValidateSaveState(const CSTHeader& header, SaveStateInfo& info, u64 
 std::vector<SaveStateInfo> ListSaveStates(u64 program_id, u64 movie_id) {
     std::vector<SaveStateInfo> result;
     result.reserve(SaveStateSlotCount);
-    for (u32 slot = 0; slot <= SaveStateSlotCount; ++slot) {
+    for (u32 slot = 0; slot < SaveStateSlotCount; ++slot) {
         const auto path = GetSaveStatePath(program_id, movie_id, slot);
         if (!FileUtil::Exists(path)) {
             continue;
@@ -209,9 +209,15 @@ void System::LoadState(u32 slot) {
 
     std::vector<u8> decompressed;
     {
-        std::vector<u8> buffer(FileUtil::GetSize(path) - sizeof(CSTHeader));
-
         FileUtil::IOFile file(path, "rb");
+        if (!file) {
+            throw std::runtime_error("Could not open file at " + path);
+        }
+        const u64 file_size = file.GetSize();
+        if (file_size < sizeof(CSTHeader)) {
+            throw std::runtime_error("Save state is missing or too small at " + path);
+        }
+        std::vector<u8> buffer(static_cast<std::size_t>(file_size - sizeof(CSTHeader)));
 
         // load header
         CSTHeader header;

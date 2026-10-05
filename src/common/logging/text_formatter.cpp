@@ -36,7 +36,15 @@ void PrintMessage(const Entry& entry) {
     fputs(str.c_str(), stderr);
 }
 
+/// The console colour APIs are not in the UWP app partition; importing them prevents loading.
+#if defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_APP
+#define CITRA_NO_CONSOLE_COLOR
+#endif
+
 void PrintColoredMessage(const Entry& entry) {
+#if defined(CITRA_NO_CONSOLE_COLOR)
+    PrintMessage(entry);
+#else
 #ifdef _WIN32
     HANDLE console_handle = GetStdHandle(STD_ERROR_HANDLE);
     if (console_handle == INVALID_HANDLE_VALUE) {
@@ -108,6 +116,7 @@ void PrintColoredMessage(const Entry& entry) {
     fputs(ESC "[0m", stderr);
 #undef ESC
 #endif
+#endif // CITRA_NO_CONSOLE_COLOR
 }
 
 void PrintMessageToLogcat([[maybe_unused]] const Entry& entry) {

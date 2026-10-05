@@ -1897,8 +1897,8 @@ void GMainWindow::OnGameListOpenFolder(u64 data_id, GameListOpenTarget target) {
     }
     case GameListOpenTarget::MODS: {
         open_target = "Mods";
-        path = fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),
-                           data_id);
+        path =
+            fmt::format("{}{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::ModsDir), data_id);
         break;
     }
     case GameListOpenTarget::DLC_DATA: {

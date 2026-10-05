@@ -269,6 +269,17 @@ public:
         return true;
     }
 
+    /// True when guest rendering and presentation share one OpenGL context and thread, so the
+    /// mailbox can skip its cross-context fences.
+    virtual bool UsesSingleContextForOpenGLPresentation() const {
+        return false;
+    }
+
+    /// True when buffer presentation paces frames, so RendererBase suppresses its own limiter.
+    virtual bool UsesVSyncForFramePacing() const {
+        return false;
+    }
+
     /// Cursor state for rendering a touch crosshair on the bottom screen.
     struct CursorInfo {
         bool visible = false;

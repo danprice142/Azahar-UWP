@@ -47,9 +47,17 @@ void DspInterface::OutputFrame(StereoFrame16 frame) {
         fifo.Push(frame.data(), frame.size());
     }
 
-    auto video_dumper = system.GetVideoDumper();
-    if (video_dumper && video_dumper->IsDumping()) {
+    const auto [video_dumper, aux_video_dumper] = system.GetVideoDumpers();
+    const bool dump_main_audio = video_dumper && video_dumper->IsDumping();
+    const bool dump_aux_audio =
+        aux_video_dumper && aux_video_dumper != video_dumper && aux_video_dumper->IsDumping();
+    if (dump_main_audio && dump_aux_audio) {
+        video_dumper->AddAudioFrame(frame);
+        aux_video_dumper->AddAudioFrame(std::move(frame));
+    } else if (dump_main_audio) {
         video_dumper->AddAudioFrame(std::move(frame));
+    } else if (dump_aux_audio) {
+        aux_video_dumper->AddAudioFrame(std::move(frame));
     }
 }
 
@@ -64,9 +72,12 @@ void DspInterface::OutputSample(std::array<s16, 2> sample) {
         fifo.Push(&sample, 1);
     }
 
-    auto video_dumper = system.GetVideoDumper();
+    const auto [video_dumper, aux_video_dumper] = system.GetVideoDumpers();
     if (video_dumper && video_dumper->IsDumping()) {
-        video_dumper->AddAudioSample(std::move(sample));
+        video_dumper->AddAudioSample(sample);
+    }
+    if (aux_video_dumper && aux_video_dumper != video_dumper && aux_video_dumper->IsDumping()) {
+        aux_video_dumper->AddAudioSample(sample);
     }
 }
 

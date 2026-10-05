@@ -68,13 +68,14 @@ Result MiiSelector::Start(const Service::APT::MessageParameter& parameter) {
 
 void MiiSelector::Update() {
     using namespace Frontend;
+    if (!frontend_applet->DataReady()) {
+        return;
+    }
     const MiiSelectorData& data = frontend_applet->ReceiveData();
     result.return_code = data.return_code;
     result.selected_mii_data = data.mii;
     result.selected_guest_mii_index = 0xFFFFFFFF;
 
-    // TODO(Subv): We're finalizing the applet immediately after it's started,
-    // but we should defer this call until after all the input has been collected.
     Finalize();
 }
 

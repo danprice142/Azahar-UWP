@@ -128,6 +128,8 @@ if ("x86_64" IN_LIST ARCHITECTURE OR "arm64" IN_LIST ARCHITECTURE)
         set(DYNARMIC_TESTS OFF CACHE BOOL "")
         set(DYNARMIC_FRONTENDS "A32" CACHE STRING "")
         set(DYNARMIC_USE_PRECOMPILED_HEADERS ${CITRA_USE_PRECOMPILED_HEADERS} CACHE BOOL "")
+        # W^X is left off for WINDOWS_STORE: the container grants PAGE_EXECUTE_READWRITE via
+        # uwp_jit_memory.cpp, and dynarmic's W^X implementation faults on some patch writes.
         add_subdirectory(dynarmic EXCLUDE_FROM_ALL)
     endif()
 endif()
@@ -524,4 +526,20 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64|armv8")
 else()
     target_compile_definitions(xxhash PRIVATE XXH_VECTOR=XXH_SCALAR)
     message(STATUS "Disabling SIMD for xxHash")
+endif()
+
+# Dear ImGui, the UI toolkit of the UWP frontend. Qt has no WinRT platform plugin.
+if (WINDOWS_STORE)
+    add_library(imgui STATIC
+        imgui/imgui.cpp
+        imgui/imgui_draw.cpp
+        imgui/imgui_tables.cpp
+        imgui/imgui_widgets.cpp
+        imgui/backends/imgui_impl_sdl2.cpp
+        imgui/backends/imgui_impl_opengl3.cpp
+    )
+    target_include_directories(imgui PUBLIC ./imgui ./imgui/backends)
+    target_link_libraries(imgui PRIVATE SDL2-static)
+    # ImGui's bundled GL loader keeps its own function table and does not collide with glad.
+    target_disable_warnings(imgui)
 endif()

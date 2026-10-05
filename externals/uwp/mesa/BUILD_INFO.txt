@@ -1,0 +1,35 @@
+Mesa 26.1.3 for Azahar UWP
+================================
+
+The minimized archive at ../mesa-uwp-26.1.3.zip is an x64 AppContainer build of
+SternXD/mesa-uwp branch uwp-26.1.3 at commit:
+
+    5c46f0b8b4278d046345526343761524db7611e2
+
+Source: https://github.com/SternXD/mesa-uwp/tree/5c46f0b8b4278d046345526343761524db7611e2
+Upstream release: https://github.com/SternXD/mesa-uwp/releases/tag/26.1.3
+
+The following Azahar patches are applied to that exact revision, in this order:
+
+    azahar-output-size.patch
+    azahar-frame-latency.patch
+
+Their preimage blob IDs match the source commit:
+
+    6624c2ceaa02c8311a2acedd1583fdecd05279be  src/util/uwp_util.cpp
+    be5a43c72e2171ccd392693b26dd826a545b6181  src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_uwp.cpp
+
+The archive contains only the runtime and import libraries used by Azahar. Its SHA-256 is:
+
+    CC63A939F021CD6B9213FE8CFBA27ECB3CB1767665C1014CDBB169EADB485013
+
+Payload SHA-256:
+
+    DE960071619396D8C62219549D2AEC549D02A3F20D8DF22A624262B53FD3824D  bin/libgallium_wgl.dll
+    E6D2F814B3EB7528E8A13CD03AFEFC11169DA679639B88F70B5D7162C826C571  bin/opengl32.dll
+    0CFA1E87256415D907AD44609151CFDCDAD7A0E83A7404E6475B01E8A9263FDF  bin/z-1.dll
+    790C98459552D2AD067BB31101D98F7F7C3E613EF433FF43A3C9A4564DE26E49  lib/libgallium_wgl.lib
+    0418148415277028289EC36A660145CE5350B52CC1656154D03CC1F3BAD5E1B1  lib/opengl32.lib
+
+The source commit's complete licence set is stored beside this file under licenses/. The bundled
+z-1.dll is zlib 1.3.1 from Mesa's pinned subproject; its notice is ZLIB-LICENSE.txt.

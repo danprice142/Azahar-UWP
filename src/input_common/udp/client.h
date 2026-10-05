@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <array>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -29,9 +31,25 @@ struct Version;
 } // namespace Response
 
 struct DeviceStatus {
+    static constexpr std::chrono::milliseconds PACKET_TIMEOUT{1000};
+
+    struct PadStatus {
+        bool active{};
+        u16 digital_buttons{};
+        bool home{};
+        bool touch_hard_press{};
+        // Left X/Y followed by right X/Y. DSU uses 128 as neutral, with positive Y upward.
+        std::array<u8, 4> stick_axes{128, 128, 128, 128};
+        std::array<u8, 4> analog_dpad{};
+        std::array<u8, 4> analog_face{};
+        std::array<u8, 4> analog_shoulder{};
+    };
+
     std::mutex update_mutex;
     std::tuple<Common::Vec3<float>, Common::Vec3<float>> motion_status;
     std::tuple<float, float, bool> touch_status;
+    PadStatus pad_status;
+    std::chrono::steady_clock::time_point last_update{};
 
     // calibration data for scaling the device's touch area to 3ds
     struct CalibrationData {
@@ -60,7 +78,7 @@ private:
     std::unique_ptr<Socket> socket;
     std::shared_ptr<DeviceStatus> status;
     std::thread thread;
-    u64 packet_sequence = 0;
+    std::optional<u32> packet_sequence;
 };
 
 /// An async job allowing configuration of the touchpad calibration.

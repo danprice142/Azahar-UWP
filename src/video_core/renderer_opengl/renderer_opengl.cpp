@@ -76,13 +76,18 @@ RendererOpenGL::RendererOpenGL(Core::System& system, Pica::PicaCore& pica_,
                                Frontend::EmuWindow& window, Frontend::EmuWindow* secondary_window)
     : VideoCore::RendererBase{system, window, secondary_window}, pica{pica_},
       rasterizer{system.Memory(), pica, system.CustomTexManager(), *this, driver},
-      frame_dumper{system, window} {
+      frame_dumper{system, window},
+      aux_frame_dumper{system, window, [this] {
+                           std::lock_guard lock{aux_video_dumper_mutex};
+                           return aux_video_dumper;
+                       }} {
     const bool has_debug_tool = driver.HasDebugTool();
     window.mailbox = std::make_unique<OGLTextureMailbox>(has_debug_tool);
     if (secondary_window) {
         secondary_window->mailbox = std::make_unique<OGLTextureMailbox>(has_debug_tool);
     }
     frame_dumper.mailbox = std::make_unique<OGLVideoDumpingMailbox>();
+    aux_frame_dumper.mailbox = std::make_unique<OGLVideoDumpingMailbox>();
     InitOpenGLObjects();
 }
 
@@ -118,7 +123,8 @@ void RendererOpenGL::SwapBuffers() {
     render_window.SwapBuffers();
 #else
     const auto& main_layout = render_window.GetFramebufferLayout();
-    RenderToMailbox(main_layout, render_window.mailbox, false);
+    RenderToMailbox(main_layout, render_window.mailbox, false,
+                    render_window.UsesSingleContextForOpenGLPresentation());
 
 #ifdef ANDROID
     // On Android, if secondary_window is defined at all,
@@ -126,7 +132,8 @@ void RendererOpenGL::SwapBuffers() {
     if (secondary_window) {
         const auto& secondary_layout = secondary_window->GetFramebufferLayout();
         isSecondaryWindow = true;
-        RenderToMailbox(secondary_layout, secondary_window->mailbox, false);
+        RenderToMailbox(secondary_layout, secondary_window->mailbox, false,
+                        secondary_window->UsesSingleContextForOpenGLPresentation());
         secondary_window->PollEvents();
     }
 #else
@@ -134,18 +141,30 @@ void RendererOpenGL::SwapBuffers() {
         ASSERT(secondary_window);
         const auto& secondary_layout = secondary_window->GetFramebufferLayout();
         isSecondaryWindow = true;
-        RenderToMailbox(secondary_layout, secondary_window->mailbox, false);
+        RenderToMailbox(secondary_layout, secondary_window->mailbox, false,
+                        secondary_window->UsesSingleContextForOpenGLPresentation());
         secondary_window->PollEvents();
     }
 #endif
 
     if (frame_dumper.IsDumping()) {
         try {
-            RenderToMailbox(frame_dumper.GetLayout(), frame_dumper.mailbox, true);
+            RenderToMailbox(frame_dumper.GetLayout(), frame_dumper.mailbox, true, false, true);
         } catch (const OGLTextureMailboxException& exception) {
             LOG_DEBUG(Render_OpenGL, "Frame dumper exception caught: {}", exception.what());
         }
     }
+    if (aux_frame_dumper.IsDumping()) {
+        try {
+            RenderToMailbox(aux_frame_dumper.GetLayout(), aux_frame_dumper.mailbox, true, false,
+                            true);
+        } catch (const OGLTextureMailboxException& exception) {
+            LOG_DEBUG(Render_OpenGL, "Aux frame dumper exception caught: {}", exception.what());
+        }
+    }
+
+    // Clear this once so every consumer (dumping and streaming) sees the same duplicate state.
+    Core::PerfStats::game_frames_updated = false;
 #endif
 
     system.perf_stats->EndSwap();
@@ -212,8 +231,9 @@ void RendererOpenGL::PrepareRendertarget() {
 
 void RendererOpenGL::RenderToMailbox(const Layout::FramebufferLayout& layout,
                                      std::unique_ptr<Frontend::TextureMailbox>& mailbox,
-                                     bool flipped) {
-    if (!Settings::values.use_skip_duplicate_frames.GetValue() ||
+                                     bool flipped, bool presentation_uses_render_context,
+                                     bool include_duplicate_frames) {
+    if (include_duplicate_frames || !Settings::values.use_skip_duplicate_frames.GetValue() ||
         Core::PerfStats::game_frames_updated) {
         Frontend::Frame* frame;
         {
@@ -223,9 +243,9 @@ void RendererOpenGL::RenderToMailbox(const Layout::FramebufferLayout& layout,
 
             // Clean up sync objects before drawing
 
-            // INTEL driver workaround. We can't delete the previous render sync object until we are
-            // sure that the presentation is done
-            if (frame->present_fence) {
+            // A single context (UWP) already orders both passes; the fences would only add GPU
+            // bubbles.
+            if (frame->present_fence && !presentation_uses_render_context) {
                 glClientWaitSync(frame->present_fence, 0, GL_TIMEOUT_IGNORED);
             }
 
@@ -237,7 +257,9 @@ void RendererOpenGL::RenderToMailbox(const Layout::FramebufferLayout& layout,
 
             // wait for the presentation to be done
             if (frame->present_fence) {
-                glWaitSync(frame->present_fence, 0, GL_TIMEOUT_IGNORED);
+                if (!presentation_uses_render_context) {
+                    glWaitSync(frame->present_fence, 0, GL_TIMEOUT_IGNORED);
+                }
                 glDeleteSync(frame->present_fence);
                 frame->present_fence = nullptr;
             }
@@ -254,14 +276,12 @@ void RendererOpenGL::RenderToMailbox(const Layout::FramebufferLayout& layout,
             state.draw.draw_framebuffer = frame->render.handle;
             state.Apply();
             DrawScreens(layout, flipped);
-            // Create a fence for the frontend to wait on and swap this frame to OffTex
-            frame->render_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-            glFlush();
+            if (!presentation_uses_render_context) {
+                // Create a fence for the frontend to wait on and swap this frame to OffTex.
+                frame->render_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                glFlush();
+            }
             mailbox->ReleaseRenderFrame(frame);
-        }
-
-        if ((secondaryWindowEnabled && isSecondaryWindow) || (!secondaryWindowEnabled)) {
-            Core::PerfStats::game_frames_updated = false;
         }
     }
 }
@@ -718,12 +738,16 @@ void RendererOpenGL::DrawScreens(const Layout::FramebufferLayout& layout, bool f
     if (!Settings::values.swap_screen.GetValue()) {
         DrawTopScreen(layout, top_screen);
         glUniform1i(uniform_layer, 0);
-        ApplySecondLayerOpacity(layout.bottom_opacity);
+        if (layout.bottom_opacity < 1.0f) {
+            ApplySecondLayerOpacity(layout.bottom_opacity);
+        }
         DrawBottomScreen(layout, bottom_screen);
     } else {
         DrawBottomScreen(layout, bottom_screen);
         glUniform1i(uniform_layer, 0);
-        ApplySecondLayerOpacity(layout.top_opacity);
+        if (layout.top_opacity < 1.0f) {
+            ApplySecondLayerOpacity(layout.top_opacity);
+        }
         DrawTopScreen(layout, top_screen);
     }
 
@@ -743,6 +767,11 @@ void RendererOpenGL::ApplySecondLayerOpacity(float opacity) {
     state.blend.src_a_func = GL_CONSTANT_ALPHA;
     state.blend.dst_a_func = GL_ONE_MINUS_CONSTANT_ALPHA;
     state.blend.dst_rgb_func = GL_ONE_MINUS_CONSTANT_ALPHA;
+    // mesa's d3d12 backend uses the full blend-colour vector for GL_CONSTANT_ALPHA; replicate
+    // the opacity into RGB.
+    state.blend.color.red = opacity;
+    state.blend.color.green = opacity;
+    state.blend.color.blue = opacity;
     state.blend.color.alpha = opacity;
 }
 
@@ -751,6 +780,9 @@ void RendererOpenGL::ResetSecondLayerOpacity() {
     state.blend.dst_rgb_func = GL_ZERO;
     state.blend.src_a_func = GL_ONE;
     state.blend.dst_a_func = GL_ZERO;
+    state.blend.color.red = 0.0f;
+    state.blend.color.green = 0.0f;
+    state.blend.color.blue = 0.0f;
     state.blend.color.alpha = 0.0f;
 }
 
@@ -878,6 +910,7 @@ void RendererOpenGL::DrawBottomScreen(const Layout::FramebufferLayout& layout,
 
 void RendererOpenGL::TryPresent(int timeout_ms, bool is_secondary) {
     const auto& window = is_secondary ? *secondary_window : render_window;
+    const bool presentation_uses_render_context = window.UsesSingleContextForOpenGLPresentation();
     const auto& layout = window.GetFramebufferLayout();
     auto frame = window.mailbox->TryGetPresentFrame(timeout_ms);
     if (!frame) {
@@ -894,7 +927,9 @@ void RendererOpenGL::TryPresent(int timeout_ms, bool is_secondary) {
         LOG_DEBUG(Render_OpenGL, "Reloading present frame");
         window.mailbox->ReloadPresentFrame(frame, layout.width, layout.height);
     }
-    glWaitSync(frame->render_fence, 0, GL_TIMEOUT_IGNORED);
+    if (frame->render_fence && !presentation_uses_render_context) {
+        glWaitSync(frame->render_fence, 0, GL_TIMEOUT_IGNORED);
+    }
     // INTEL workaround.
     // Normally we could just delete the draw fence here, but due to driver bugs, we can just delete
     // it on the emulation thread without too much penalty
@@ -910,9 +945,11 @@ void RendererOpenGL::TryPresent(int timeout_ms, bool is_secondary) {
         glDeleteSync(frame->present_fence);
     }
 
-    /* insert fence for the main thread to block on */
-    frame->present_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    glFlush();
+    if (!presentation_uses_render_context) {
+        /* insert fence for the main thread to block on */
+        frame->present_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        glFlush();
+    }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
@@ -934,6 +971,32 @@ void RendererOpenGL::CleanupVideoDumping() {
         mailbox->quit = true;
     }
     mailbox->free_cv.notify_one();
+}
+
+void RendererOpenGL::StartAuxVideoDumping(std::shared_ptr<VideoDumper::Backend> backend) {
+    StopAuxVideoDumping();
+    {
+        std::lock_guard lock{aux_video_dumper_mutex};
+        aux_video_dumper = std::move(backend);
+    }
+    auto* mailbox = static_cast<OGLVideoDumpingMailbox*>(aux_frame_dumper.mailbox.get());
+    {
+        std::scoped_lock lock{mailbox->swap_chain_lock};
+        mailbox->quit = false;
+    }
+    aux_frame_dumper.StartDumping();
+}
+
+void RendererOpenGL::StopAuxVideoDumping() {
+    aux_frame_dumper.StopDumping();
+    auto* mailbox = static_cast<OGLVideoDumpingMailbox*>(aux_frame_dumper.mailbox.get());
+    {
+        std::scoped_lock lock{mailbox->swap_chain_lock};
+        mailbox->quit = true;
+    }
+    mailbox->free_cv.notify_one();
+    std::lock_guard lock{aux_video_dumper_mutex};
+    aux_video_dumper.reset();
 }
 
 } // namespace OpenGL

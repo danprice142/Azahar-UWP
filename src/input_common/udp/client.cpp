@@ -7,15 +7,91 @@
 #include <chrono>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <thread>
+#include <vector>
 #include <boost/asio.hpp>
 #include "common/logging/log.h"
 #include "input_common/udp/client.h"
 #include "input_common/udp/protocol.h"
+#include "input_common/udp/udp.h"
 
 using boost::asio::ip::udp;
 
 namespace InputCommon::CemuhookUDP {
+
+namespace {
+
+struct ValidPacket {
+    u32 type = 0;
+    const u8* payload = nullptr;
+    std::size_t payload_size = 0;
+};
+
+std::optional<ValidPacket> ValidatePacket(const u8* data, std::size_t size) {
+    if (size < sizeof(Header)) {
+        return std::nullopt;
+    }
+    Header header{};
+    std::memcpy(&header, data, sizeof(header));
+    if (header.magic != SERVER_MAGIC || header.protocol_version != PROTOCOL_VERSION ||
+        header.payload_length < sizeof(Type)) {
+        return std::nullopt;
+    }
+    const std::size_t packet_size =
+        sizeof(Header) + static_cast<std::size_t>(header.payload_length) - sizeof(Type);
+    if (packet_size != size) {
+        return std::nullopt;
+    }
+    std::vector<u8> crc_data(data, data + size);
+    std::memset(crc_data.data() + offsetof(Header, crc), 0, sizeof(u32_le));
+    boost::crc_32_type crc;
+    crc.process_bytes(crc_data.data(), crc_data.size());
+    if (crc.checksum() != static_cast<u32>(header.crc)) {
+        return std::nullopt;
+    }
+    return ValidPacket{static_cast<u32>(header.type), data + sizeof(Header), size - sizeof(Header)};
+}
+
+std::vector<u8> BuildClientPacket(u32 type, const std::vector<u8>& payload, u32 client_id) {
+    std::vector<u8> packet(sizeof(Header) + payload.size());
+    Header header{
+        CLIENT_MAGIC, PROTOCOL_VERSION,       static_cast<u16>(payload.size() + sizeof(Type)), 0,
+        client_id,    static_cast<Type>(type)};
+    std::memcpy(packet.data(), &header, sizeof(header));
+    if (!payload.empty()) {
+        std::memcpy(packet.data() + sizeof(header), payload.data(), payload.size());
+    }
+    boost::crc_32_type crc;
+    crc.process_bytes(packet.data(), packet.size());
+    const u32 checksum = crc.checksum();
+    std::memcpy(packet.data() + offsetof(Header, crc), &checksum, sizeof(checksum));
+    return packet;
+}
+
+std::vector<u8> BuildAzaharState() {
+    constexpr u32 cap_state = 1U << 0;
+    constexpr u32 cap_remote_commands = 1U << 6;
+    constexpr u32 cap_launch_by_id = 1U << 9;
+    std::vector<u8> payload(261);
+    const auto state = GetRemoteFrontendState();
+    payload[0] = state.flags;
+    const auto copy_string = [&payload](std::size_t offset, const std::string& value) {
+        const std::size_t length = std::min<std::size_t>(63, value.size());
+        std::memcpy(payload.data() + offset, value.data(), length);
+    };
+    copy_string(1, state.game_name);
+    copy_string(65, state.platform_name);
+    copy_string(129, state.core_name);
+    constexpr char app_name[] = "Azahar";
+    std::memcpy(payload.data() + 193, app_name, sizeof(app_name) - 1);
+    const u32 capabilities =
+        cap_state | cap_remote_commands | cap_launch_by_id | GetRemoteFrontendExtraCapabilities();
+    std::memcpy(payload.data() + 257, &capabilities, sizeof(capabilities));
+    return payload;
+}
+
+} // namespace
 
 struct SocketCallback {
     std::function<void(Response::Version)> version;
@@ -51,7 +127,7 @@ public:
     }
 
     void StartSend(const clock::time_point& from) {
-        timer.expires_at(from + std::chrono::seconds(3));
+        timer.expires_at(from + std::chrono::seconds(1));
         timer.async_wait([this](const boost::system::error_code& error) { HandleSend(error); });
     }
 
@@ -65,30 +141,69 @@ public:
 
 private:
     void HandleReceive(const boost::system::error_code& error, std::size_t bytes_transferred) {
-        if (auto type = Response::Validate(receive_buffer.data(), bytes_transferred)) {
-            switch (*type) {
-            case Type::Version: {
+        if (error) {
+            if (error == boost::asio::error::operation_aborted) {
+                return;
+            }
+            LOG_DEBUG(Input, "DSU receive failed: {}", error.message());
+            StartReceive();
+            return;
+        }
+        // Reject control packets from any host or port other than the configured server.
+        if (receive_endpoint != send_endpoint) {
+            LOG_WARNING(Input, "Ignoring DSU packet from unexpected endpoint {}:{}",
+                        receive_endpoint.address().to_string(), receive_endpoint.port());
+            StartReceive();
+            return;
+        }
+        if (const auto packet = ValidatePacket(receive_buffer.data(), bytes_transferred)) {
+            switch (packet->type) {
+            case static_cast<u32>(Type::Version): {
+                if (packet->payload_size != sizeof(Response::Version)) {
+                    break;
+                }
                 Response::Version version;
-                std::memcpy(&version, &receive_buffer[sizeof(Header)], sizeof(Response::Version));
+                std::memcpy(&version, packet->payload, sizeof(Response::Version));
                 callback.version(std::move(version));
                 break;
             }
-            case Type::PortInfo: {
+            case static_cast<u32>(Type::PortInfo): {
+                if (packet->payload_size != sizeof(Response::PortInfo)) {
+                    break;
+                }
                 Response::PortInfo port_info;
-                std::memcpy(&port_info, &receive_buffer[sizeof(Header)],
-                            sizeof(Response::PortInfo));
+                std::memcpy(&port_info, packet->payload, sizeof(Response::PortInfo));
                 callback.port_info(std::move(port_info));
                 break;
             }
-            case Type::PadData: {
+            case static_cast<u32>(Type::PadData): {
+                if (packet->payload_size != sizeof(Response::PadData)) {
+                    break;
+                }
                 Response::PadData pad_data;
-                std::memcpy(&pad_data, &receive_buffer[sizeof(Header)], sizeof(Response::PadData));
+                std::memcpy(&pad_data, packet->payload, sizeof(Response::PadData));
                 callback.pad_data(std::move(pad_data));
                 break;
             }
+            default:
+                for (auto& response :
+                     HandleExtendedRequest(packet->type, packet->payload, packet->payload_size)) {
+                    SendExtended(response.type, response.payload);
+                }
+                break;
             }
         }
         StartReceive();
+    }
+
+    void SendExtended(u32 type, const std::vector<u8>& payload) {
+        boost::system::error_code ignored{};
+        const auto packet = BuildClientPacket(type, payload, client_id);
+        socket.send_to(boost::asio::buffer(packet), send_endpoint, {}, ignored);
+        if (ignored) {
+            LOG_WARNING(Input, "Failed to send extended DSU packet 0x{:08X}: {}", type,
+                        ignored.message());
+        }
     }
 
     void HandleSend(const boost::system::error_code& error) {
@@ -104,6 +219,11 @@ private:
         const auto pad_message = Request::Create(pad_data, client_id);
         std::memcpy(send_buffer2.data(), &pad_message, PAD_DATA_SIZE);
         socket.send_to(boost::asio::buffer(send_buffer2), send_endpoint, {}, _ignored);
+
+        SendExtended(static_cast<u32>(Type::State), BuildAzaharState());
+        for (auto& response : TakePendingExtendedResponses()) {
+            SendExtended(response.type, response.payload);
+        }
         StartSend(timer.expiry());
     }
 
@@ -121,7 +241,7 @@ private:
     std::array<u8, PAD_DATA_SIZE> send_buffer2;
     udp::endpoint send_endpoint;
 
-    std::array<u8, MAX_PACKET_SIZE> receive_buffer;
+    std::array<u8, EXTENDED_MAX_PACKET_SIZE> receive_buffer;
     udp::endpoint receive_endpoint;
 };
 
@@ -158,14 +278,19 @@ void Client::OnPortInfo(Response::PortInfo data) {
 
 void Client::OnPadData(Response::PadData data) {
     LOG_TRACE(Input, "PadData packet received");
-    if (data.packet_counter <= packet_sequence) {
+    const u32 incoming_sequence = data.packet_counter;
+    // Treat the counter as a wrapping 32-bit sequence number.
+    const u32 sequence_delta =
+        packet_sequence ? incoming_sequence - *packet_sequence : std::numeric_limits<u32>::max();
+    if (packet_sequence &&
+        (sequence_delta == 0 || sequence_delta > std::numeric_limits<s32>::max())) {
         LOG_WARNING(
             Input,
             "PadData packet dropped because its stale info. Current count: {} Packet count: {}",
-            packet_sequence, data.packet_counter);
+            *packet_sequence, incoming_sequence);
         return;
     }
-    packet_sequence = data.packet_counter;
+    packet_sequence = incoming_sequence;
     // Due to differences between the 3ds and cemuhookudp motion directions, we need to invert
     // accel.x and accel.z and also invert pitch and yaw. See
     // https://github.com/citra-emu/citra/pull/4049 for more details on gyro/accel
@@ -173,12 +298,29 @@ void Client::OnPadData(Response::PadData data) {
     Common::Vec3f gyro = Common::MakeVec<float>(-data.gyro.pitch, -data.gyro.yaw, data.gyro.roll);
     {
         std::lock_guard guard(status->update_mutex);
+        status->last_update = std::chrono::steady_clock::now();
 
-        status->motion_status = {accel, gyro};
+        auto& pad = status->pad_status;
+        pad.active = data.info.is_pad_active != 0;
+        if (pad.active) {
+            pad.digital_buttons = data.digital_button;
+            pad.home = data.home != 0;
+            pad.touch_hard_press = data.touch_hard_press != 0;
+            pad.stick_axes = {data.left_stick_x, data.left_stick_y, data.right_stick_x,
+                              data.right_stick_y};
+            pad.analog_dpad = data.analog_button.dpad;
+            pad.analog_face = data.analog_button.face;
+            pad.analog_shoulder = data.analog_button.shoulder;
+        } else {
+            pad = {};
+        }
+
+        status->motion_status = pad.active ? std::make_tuple(accel, gyro)
+                                           : std::make_tuple(Common::Vec3f{}, Common::Vec3f{});
 
         // TODO: add a setting for "click" touch. Click touch refers to a device that differentiates
         // between a simple "tap" and a hard press that causes the touch screen to click.
-        const bool is_active = data.touch_1.is_active != 0;
+        const bool is_active = pad.active && data.touch_1.is_active != 0;
 
         float x = 0;
         float y = 0;
@@ -189,10 +331,12 @@ void Client::OnPadData(Response::PadData data) {
             const u16 min_y = status->touch_calibration->min_y;
             const u16 max_y = status->touch_calibration->max_y;
 
-            x = (std::clamp(static_cast<u16>(data.touch_1.x), min_x, max_x) - min_x) /
-                static_cast<float>(max_x - min_x);
-            y = (std::clamp(static_cast<u16>(data.touch_1.y), min_y, max_y) - min_y) /
-                static_cast<float>(max_y - min_y);
+            if (max_x > min_x && max_y > min_y) {
+                x = (std::clamp(static_cast<u16>(data.touch_1.x), min_x, max_x) - min_x) /
+                    static_cast<float>(max_x - min_x);
+                y = (std::clamp(static_cast<u16>(data.touch_1.y), min_y, max_y) - min_y) /
+                    static_cast<float>(max_y - min_y);
+            }
         }
 
         status->touch_status = {x, y, is_active};
@@ -200,6 +344,14 @@ void Client::OnPadData(Response::PadData data) {
 }
 
 void Client::StartCommunication(const std::string& host, u16 port, u8 pad_index, u32 client_id) {
+    packet_sequence.reset();
+    {
+        std::lock_guard guard(status->update_mutex);
+        status->pad_status = {};
+        status->motion_status = {};
+        status->touch_status = {};
+        status->last_update = {};
+    }
     SocketCallback callback{[this](Response::Version version) { OnVersion(version); },
                             [this](Response::PortInfo info) { OnPortInfo(info); },
                             [this](Response::PadData data) { OnPadData(data); }};

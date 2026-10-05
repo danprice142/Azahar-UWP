@@ -17,8 +17,9 @@ static constexpr std::size_t GetSizeOfResponseType(Type t) {
         return sizeof(Response::PortInfo);
     case Type::PadData:
         return sizeof(Response::PadData);
+    default:
+        return 0;
     }
-    return 0;
 }
 
 namespace Response {

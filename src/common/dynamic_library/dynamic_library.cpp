@@ -8,6 +8,7 @@
 #else
 #include <dlfcn.h>
 #endif
+#include "common/string_util.h"
 #include "dynamic_library.h"
 
 namespace Common {
@@ -33,7 +34,22 @@ DynamicLibrary::~DynamicLibrary() {
 }
 
 bool DynamicLibrary::Load(std::string_view filename) {
-#if defined(_WIN32)
+#if defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_APP
+    // LoadPackagedLibrary accepts only a packaged module's file name, not a path.
+    const std::string_view name = [filename] {
+        const auto slash = filename.find_last_of("\\/");
+        return slash == std::string_view::npos ? filename : filename.substr(slash + 1);
+    }();
+    const std::wstring wide_name = Common::UTF8ToUTF16W(std::string{name});
+
+    handle = reinterpret_cast<void*>(LoadPackagedLibrary(wide_name.c_str(), 0));
+    if (!handle) {
+        load_error = "LoadPackagedLibrary(" + std::string{name} +
+                     ") failed: " + std::to_string(GetLastError()) +
+                     " (the library must be packaged alongside the executable)";
+        return false;
+    }
+#elif defined(_WIN32)
     handle = reinterpret_cast<void*>(LoadLibraryA(filename.data()));
     if (!handle) {
         DWORD error_message_id = GetLastError();

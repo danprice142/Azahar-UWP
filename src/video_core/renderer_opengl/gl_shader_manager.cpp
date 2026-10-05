@@ -46,7 +46,10 @@ static OGLProgram GeneratePrecompiledProgram(const ShaderDiskCacheDump& dump,
                                              bool separable) {
 
     if (supported_formats.find(dump.binary_format) == supported_formats.end()) {
-        LOG_INFO(Render_OpenGL, "Precompiled cache entry with unsupported format - removing");
+        LOG_INFO(Render_OpenGL,
+                 "Precompiled cache entry uses unsupported program-binary format {:#x} "
+                 "(driver advertised {} formats) - rebuilding",
+                 dump.binary_format, supported_formats.size());
         return {};
     }
 
@@ -73,6 +76,12 @@ static std::set<GLenum> GetSupportedFormats() {
 
     GLint num_formats{};
     glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &num_formats);
+    if (num_formats <= 0) {
+        LOG_INFO(Render_OpenGL,
+                 "Driver advertises no program-binary formats; the GLSL disk cache will be "
+                 "rebuilt from source");
+        return supported_formats;
+    }
 
     std::vector<GLint> formats(num_formats);
     glGetIntegerv(GL_PROGRAM_BINARY_FORMATS, formats.data());
@@ -682,13 +691,17 @@ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
         }
     };
 
-    if (!strict_context_required) {
-        const std::size_t num_workers{std::max(1U, std::thread::hardware_concurrency())};
+    if (load_raws_size != 0 && !strict_context_required) {
+        // Do not create idle contexts; creation is expensive on translated drivers such as mesa
+        // d3d12.
+        const std::size_t hardware_workers{std::max(1U, std::thread::hardware_concurrency())};
+        const std::size_t num_workers{std::min(load_raws_size, hardware_workers)};
         const std::size_t bucket_size{load_raws_size / num_workers};
         std::vector<std::unique_ptr<Frontend::GraphicsContext>> contexts(num_workers);
         std::vector<std::thread> threads(num_workers);
 
         emu_window.SaveContext();
+        std::size_t fallback_start = load_raws_size;
         for (std::size_t i = 0; i < num_workers; ++i) {
             const bool is_last_worker = i + 1 == num_workers;
             const std::size_t start{bucket_size * i};
@@ -696,15 +709,30 @@ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
 
             // On some platforms the shared context has to be created from the GUI thread
             contexts[i] = emu_window.CreateSharedContext();
+            if (!contexts[i]) {
+                // The frontend could not produce another context; compile those buckets here.
+                fallback_start = start;
+                break;
+            }
             // Release the context, so it can be immediately used by the spawned thread
             contexts[i]->DoneCurrent();
             threads[i] = std::thread(LoadRawSepareble, start, end, contexts[i].get());
         }
         for (auto& thread : threads) {
-            thread.join();
+            if (thread.joinable()) {
+                thread.join();
+            }
         }
         emu_window.RestoreContext();
-    } else {
+        if (fallback_start < load_raws_size) {
+            LOG_WARNING(Frontend,
+                        "Shared context creation failed; compiling {} shaders on the render "
+                        "thread instead",
+                        load_raws_size - fallback_start);
+            const auto fallback_context{std::make_unique<Frontend::GraphicsContext>()};
+            LoadRawSepareble(fallback_start, load_raws_size, fallback_context.get());
+        }
+    } else if (load_raws_size != 0) {
         const auto dummy_context{std::make_unique<Frontend::GraphicsContext>()};
         LoadRawSepareble(0, load_raws_size, dummy_context.get());
     }

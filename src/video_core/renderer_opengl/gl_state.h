@@ -187,7 +187,7 @@ public:
     OpenGLState& ResetRenderbuffer(GLuint handle);
 
 private:
-    static OpenGLState cur_state;
+    static thread_local OpenGLState cur_state;
 };
 
 } // namespace OpenGL

@@ -8,7 +8,7 @@
 
 namespace OpenGL {
 
-OpenGLState OpenGLState::cur_state;
+thread_local OpenGLState OpenGLState::cur_state;
 
 OpenGLState::OpenGLState() {
     // These all match default OpenGL values

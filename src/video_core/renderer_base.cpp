@@ -47,7 +47,9 @@ void RendererBase::EndFrame() {
 
     render_window.PollEvents();
 
-    system.frame_limiter.DoFrameLimiting(system.CoreTiming().GetGlobalTimeUs());
+    if (!render_window.UsesVSyncForFramePacing()) {
+        system.frame_limiter.DoFrameLimiting(system.CoreTiming().GetGlobalTimeUs());
+    }
     system.perf_stats->BeginSystemFrame();
 }
 

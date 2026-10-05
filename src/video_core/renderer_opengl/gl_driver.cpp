@@ -158,6 +158,12 @@ void Driver::DeduceVendor() {
         vendor = Vendor::Qualcomm;
     } else if (gpu_vendor.find("Samsung") != gpu_vendor.npos) {
         vendor = Vendor::Samsung;
+    } else if (gpu_vendor.find("Microsoft") != gpu_vendor.npos) {
+        // mesa's d3d12 driver identifies as D3D12, so native AMD/Intel workarounds are not applied.
+        vendor = Vendor::Microsoft;
+    } else if (gpu_vendor.find("Mesa") != gpu_vendor.npos ||
+               gpu_model.find("Mesa") != gpu_model.npos) {
+        vendor = Vendor::Mesa;
     } else if (gpu_vendor.find("GDI Generic") != gpu_vendor.npos) {
         vendor = Vendor::Generic;
     }

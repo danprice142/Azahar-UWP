@@ -84,6 +84,11 @@ System::System() : movie{*this}, cheat_engine{*this} {}
 
 System::~System() = default;
 
+void System::RequestShutdown() {
+    LOG_WARNING(Core, "Shutdown requested");
+    SendSignal(Signal::Shutdown);
+}
+
 System::ResultStatus System::RunLoop(bool tight_loop) {
     status = ResultStatus::Success;
 
@@ -297,6 +302,16 @@ bool System::SendSignal(System::Signal signal, u32 param) {
     if (current_signal != signal && current_signal != Signal::None) {
         LOG_ERROR(Core, "Unable to {} as {} is ongoing", signal, current_signal);
         return false;
+    }
+    switch (signal) {
+    case Signal::Reset:
+        LOG_WARNING(Core, "Reset requested");
+        break;
+    case Signal::Shutdown:
+        LOG_WARNING(Core, "Shutdown signal queued");
+        break;
+    default:
+        break;
     }
     current_signal = signal;
     signal_param = param;
@@ -691,7 +706,28 @@ const Cheats::CheatEngine& System::CheatEngine() const {
 }
 
 void System::RegisterVideoDumper(std::shared_ptr<VideoDumper::Backend> dumper) {
+    std::scoped_lock lock{video_dumper_mutex};
     video_dumper = std::move(dumper);
+}
+
+void System::RegisterAuxVideoDumper(std::shared_ptr<VideoDumper::Backend> dumper) {
+    std::scoped_lock lock{video_dumper_mutex};
+    aux_video_dumper = std::move(dumper);
+}
+
+std::shared_ptr<VideoDumper::Backend> System::GetVideoDumper() const {
+    std::scoped_lock lock{video_dumper_mutex};
+    return video_dumper;
+}
+
+std::shared_ptr<VideoDumper::Backend> System::GetAuxVideoDumper() const {
+    std::scoped_lock lock{video_dumper_mutex};
+    return aux_video_dumper;
+}
+
+std::array<std::shared_ptr<VideoDumper::Backend>, 2> System::GetVideoDumpers() const {
+    std::scoped_lock lock{video_dumper_mutex};
+    return {video_dumper, aux_video_dumper};
 }
 
 VideoCore::CustomTexManager& System::CustomTexManager() {
@@ -727,6 +763,21 @@ void System::Shutdown(bool is_deserializing) {
     // Shutdown emulation session
     is_powered_on = false;
 
+    const auto [registered_video_dumper, registered_aux_video_dumper] = GetVideoDumpers();
+    RegisterVideoDumper(nullptr);
+    RegisterAuxVideoDumper(nullptr);
+
+    if (registered_aux_video_dumper && registered_aux_video_dumper != registered_video_dumper &&
+        registered_aux_video_dumper->IsDumping()) {
+        if (gpu) {
+            gpu->Renderer().StopAuxVideoDumping();
+        }
+        registered_aux_video_dumper->StopDumping();
+    }
+    if (registered_video_dumper && registered_video_dumper->IsDumping()) {
+        registered_video_dumper->StopDumping();
+    }
+
     gpu.reset();
     if (!is_deserializing) {
         lle_modules.clear();
@@ -747,10 +798,6 @@ void System::Shutdown(bool is_deserializing) {
     cpu_cores.clear();
     exclusive_monitor.reset();
     timing.reset();
-
-    if (video_dumper && video_dumper->IsDumping()) {
-        video_dumper->StopDumping();
-    }
 
     if (auto room_member = Network::GetRoomMember().lock()) {
         Network::GameInfo game_info{};

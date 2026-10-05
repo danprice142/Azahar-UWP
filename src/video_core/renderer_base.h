@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "common/common_types.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "video_core/rasterizer_interface.h"
@@ -14,6 +16,10 @@ class EmuWindow;
 
 namespace Core {
 class System;
+}
+
+namespace VideoDumper {
+class Backend;
 }
 
 namespace VideoCore {
@@ -60,6 +66,10 @@ public:
     /// Cleans up after video dumping is ended
     virtual void CleanupVideoDumping() {}
 
+    /// UWP single-screen layouts may expose the hidden 3DS screen as a video-only DSU stream.
+    virtual void StartAuxVideoDumping(std::shared_ptr<VideoDumper::Backend> /*backend*/) {}
+    virtual void StopAuxVideoDumping() {}
+
     /// This is called to notify the rendering backend of a surface change
     // if second == true then it is the second screen
     virtual void NotifySurfaceChanged(bool second) {}
@@ -78,7 +88,7 @@ public:
     }
 
     u64 GetCurrentFrame() const {
-        return current_frame;
+        return current_frame.load(std::memory_order_relaxed);
     }
 
     Frontend::EmuWindow& GetRenderWindow() {
@@ -111,8 +121,8 @@ protected:
     Frontend::EmuWindow* secondary_window; /// Reference to the secondary render window handle.
 
 protected:
-    f32 current_fps = 0.0f; /// Current framerate, should be set by the renderer
-    u64 current_frame = 0;  /// Current frame, should be set by the renderer
+    f32 current_fps = 0.0f;            /// Current framerate, should be set by the renderer
+    std::atomic<u64> current_frame{0}; ///< Current frame, updated by the render thread
 };
 
 } // namespace VideoCore

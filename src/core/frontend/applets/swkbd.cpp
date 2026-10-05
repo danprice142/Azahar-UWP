@@ -131,16 +131,16 @@ ValidationError SoftwareKeyboard::Finalize(const std::string& text, u8 button) {
         }
     }
     data = {text, button};
-    data_ready = true;
+    data_ready.store(true, std::memory_order_release);
     return ValidationError::None;
 }
 
 bool SoftwareKeyboard::DataReady() const {
-    return data_ready;
+    return data_ready.load(std::memory_order_acquire);
 }
 
 const KeyboardData& SoftwareKeyboard::ReceiveData() {
-    data_ready = false;
+    data_ready.store(false, std::memory_order_relaxed);
     return data;
 }
 

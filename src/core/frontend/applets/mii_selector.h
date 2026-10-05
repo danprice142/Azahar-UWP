@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include "core/hle/applets/mii_selector.h"
@@ -31,7 +32,12 @@ class MiiSelector {
 public:
     virtual ~MiiSelector() = default;
     virtual void Setup(const MiiSelectorConfig& config_) {
+        data_ready.store(false, std::memory_order_relaxed);
         config = MiiSelectorConfig(config_);
+    }
+
+    bool DataReady() const {
+        return data_ready.load(std::memory_order_acquire);
     }
 
     const MiiSelectorData& ReceiveData() const {
@@ -47,6 +53,7 @@ public:
 protected:
     MiiSelectorConfig config;
     MiiSelectorData data;
+    std::atomic_bool data_ready{false};
 };
 
 std::vector<Mii::MiiData> LoadMiis();

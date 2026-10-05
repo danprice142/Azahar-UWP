@@ -2,6 +2,8 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <chrono>
+
 #include <cryptopp/aes.h>
 #include <cryptopp/modes.h>
 #include <cryptopp/sha.h>

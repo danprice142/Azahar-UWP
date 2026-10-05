@@ -1,0 +1,210 @@
+diff --git a/src/core/winrt/SDL_winrtapp_direct3d.cpp b/src/core/winrt/SDL_winrtapp_direct3d.cpp
+index 04c655dda..503e23fe9 100644
+--- a/src/core/winrt/SDL_winrtapp_direct3d.cpp
++++ b/src/core/winrt/SDL_winrtapp_direct3d.cpp
+@@ -46,6 +46,7 @@ extern "C" {
+ #include "SDL_render.h"
+ #include "../../video/SDL_sysvideo.h"
+ #include "../../events/SDL_events_c.h"
++#include "../../events/SDL_dropevents_c.h"
+ #include "../../events/SDL_keyboard_c.h"
+ #include "../../events/SDL_mouse_c.h"
+ #include "../../events/SDL_windowevents_c.h"
+@@ -160,7 +161,9 @@ static void WINRT_ProcessWindowSizeChange() // TODO: Pass an SDL_Window-identify
+ }
+ 
+ SDL_WinRTApp::SDL_WinRTApp() : m_windowClosed(false),
+-                               m_windowVisible(true)
++                               m_windowVisible(true),
++                               m_mainRunning(false),
++                               m_activationFilePath(nullptr)
+ {
+ }
+ 
+@@ -338,17 +341,25 @@ void SDL_WinRTApp::Run()
+ {
+     SDL_SetMainReady();
+     if (WINRT_SDLAppEntryPoint) {
+-        // TODO, WinRT: pass the C-style main() a reasonably realistic
+-        // representation of command line arguments.
+-        int argc = 1;
+-        char **argv = (char **)SDL_malloc(2 * sizeof(*argv));
++        char *activationPath = m_activationFilePath
++                                   ? WIN_StringToUTF8W(m_activationFilePath->Data())
++                                   : nullptr;
++        const int argc = activationPath ? 2 : 1;
++        char **argv = (char **)SDL_calloc((size_t)argc + 1, sizeof(*argv));
+         if (!argv) {
++            SDL_free(activationPath);
+             return;
+         }
+         argv[0] = SDL_strdup("WinRTApp");
+-        argv[1] = NULL;
++        if (activationPath) {
++            argv[1] = activationPath;
++        }
++        m_mainRunning = true;
+         WINRT_SDLAppEntryPoint(argc, argv);
+-        SDL_free(argv[0]);
++        m_mainRunning = false;
++        for (int i = 0; i < argc; ++i) {
++            SDL_free(argv[i]);
++        }
+         SDL_free(argv);
+     }
+ }
+@@ -589,6 +600,59 @@ void SDL_WinRTApp::OnWindowClosed(CoreWindow ^ sender, CoreWindowEventArgs ^ arg
+ 
+ void SDL_WinRTApp::OnAppActivated(CoreApplicationView ^ applicationView, IActivatedEventArgs ^ args)
+ {
++    auto deliverActivationPath = [this](Platform::String ^ path) {
++        if (!path || path->IsEmpty()) {
++            return;
++        }
++        if (m_mainRunning) {
++            char *utf8Path = WIN_StringToUTF8W(path->Data());
++            if (utf8Path) {
++                SDL_SendDropFile(WINRT_GlobalSDLWindow, utf8Path);
++                SDL_free(utf8Path);
++            }
++        } else {
++            m_activationFilePath = path;
++        }
++    };
++
++    if (args && args->Kind == ActivationKind::File) {
++        FileActivatedEventArgs ^ fileArgs = dynamic_cast<FileActivatedEventArgs ^>(args);
++        if (fileArgs && fileArgs->Files && fileArgs->Files->Size > 0) {
++            deliverActivationPath(fileArgs->Files->GetAt(0)->Path);
++        }
++    } else if (args && args->Kind == ActivationKind::Protocol) {
++        ProtocolActivatedEventArgs ^ protocolArgs =
++            dynamic_cast<ProtocolActivatedEventArgs ^>(args);
++        if (protocolArgs && protocolArgs->Uri) {
++            Platform::String ^ commandLine = nullptr;
++            try {
++                commandLine = protocolArgs->Uri->QueryParsed->GetFirstValueByName(L"cmd");
++            } catch (Platform::Exception ^) {
++                // A bare azahar: URI is also used to probe protocol availability.
++            }
++            if (commandLine && !commandLine->IsEmpty()) {
++                const wchar_t *path = commandLine->Data();
++                while (*path != L'\0' && *path != L' ' && *path != L'\t') {
++                    ++path;
++                }
++                while (*path == L' ' || *path == L'\t') {
++                    ++path;
++                }
++                size_t pathLength = 0;
++                while (path[pathLength] != L'\0') {
++                    ++pathLength;
++                }
++                if (pathLength >= 2 && path[0] == L'\"' && path[pathLength - 1] == L'\"') {
++                    ++path;
++                    pathLength -= 2;
++                }
++                if (pathLength != 0) {
++                    deliverActivationPath(
++                        ref new Platform::String(path, static_cast<unsigned int>(pathLength)));
++                }
++            }
++        }
++    }
+     CoreWindow::GetForCurrentThread()->Activate();
+ }
+ 
+diff --git a/src/core/winrt/SDL_winrtapp_direct3d.h b/src/core/winrt/SDL_winrtapp_direct3d.h
+index c4bfd1d46..483110b1f 100644
+--- a/src/core/winrt/SDL_winrtapp_direct3d.h
++++ b/src/core/winrt/SDL_winrtapp_direct3d.h
+@@ -88,6 +88,8 @@ ref class SDL_WinRTApp sealed : public Windows::ApplicationModel::Core::IFramewo
+   private:
+     bool m_windowClosed;
+     bool m_windowVisible;
++    bool m_mainRunning;
++    Platform::String ^ m_activationFilePath;
+ };
+ 
+ extern SDL_WinRTApp ^ SDL_WinRTGlobalApp;
+diff --git a/src/joystick/windows/SDL_windows_gaming_input.c b/src/joystick/windows/SDL_windows_gaming_input.c
+index 9299ac528..f5e67be2a 100644
+--- a/src/joystick/windows/SDL_windows_gaming_input.c
++++ b/src/joystick/windows/SDL_windows_gaming_input.c
+@@ -81,6 +81,7 @@ static struct
+     EventRegistrationToken controller_removed_token;
+     int controller_count;
+     SDL_bool ro_initialized;
++    SDL_bool other_statics_attempted;
+     WindowsGamingInputControllerState *controllers;
+ } wgi;
+ 
+@@ -260,6 +261,16 @@ static void WGI_LoadOtherControllerStatics(void)
+     RoGetActivationFactory_t RoGetActivationFactoryFunc = NULL;
+     HRESULT hr;
+ 
++    /* Attempt-once guard: this is reached from the RawGameControllerAdded callback, which runs
++       on WGI's own dispatch thread. Creating activation factories there mutates WGI's internal
++       lists while they are being iterated and intermittently fails fast with
++       FAST_FAIL_CORRUPT_LIST_ENTRY (observed on Xbox Series). It also leaked the previously
++       fetched statics on every call. One attempt only, success or not. */
++    if (wgi.other_statics_attempted) {
++        return;
++    }
++    wgi.other_statics_attempted = SDL_TRUE;
++
+ #ifdef __WINRT__
+     WindowsCreateStringReferenceFunc = WindowsCreateStringReference;
+     RoGetActivationFactoryFunc = RoGetActivationFactory;
+@@ -685,6 +696,16 @@ static int WGI_JoystickInit(void)
+ 
+     WGI_LoadRawGameControllerStatics();
+ 
++#ifdef __WINRT__
++    /* Create the remaining controller-type factories now, on the init thread, before any
++       device-added dispatch can be running. Deferring this to GetGameControllerType() means
++       the first factory creation happens on WGI's dispatch thread in the middle of an event,
++       which corrupts WGI's internal lists (FAST_FAIL_CORRUPT_LIST_ENTRY on Xbox). The lazy
++       load only exists to avoid flipping Bluetooth PS4 pads into enhanced mode, which cannot
++       matter on WinRT where DirectInput does not exist. */
++    WGI_LoadOtherControllerStatics();
++#endif
++
+     if (wgi.statics) {
+         __FIVectorView_1_Windows__CGaming__CInput__CRawGameController *controllers;
+ 
+diff --git a/src/joystick/windows/SDL_windowsjoystick.c b/src/joystick/windows/SDL_windowsjoystick.c
+index d2ea36d0c..0df53810a 100644
+--- a/src/joystick/windows/SDL_windowsjoystick.c
++++ b/src/joystick/windows/SDL_windowsjoystick.c
+@@ -530,6 +530,31 @@ void WINDOWS_JoystickDetect(void)
+ {
+     JoyStick_DeviceData *pCurList = NULL;
+ 
++#if defined(__WINRT__) && defined(SDL_JOYSTICK_XINPUT)
++    /* WinRT builds have neither the device-notification window nor the joystick thread, so
++       nothing ever sets s_bWindowsDeviceChanged after the initial scan. On Xbox the pad only
++       becomes visible to XInput a moment after launch, once the system's GameInput bridge has
++       announced it, so the init-time scan always misses it. Poll the slots for changes here. */
++    if (SDL_XINPUT_Enabled()) {
++        static Uint32 s_lastSlotScan;
++        static SDL_bool s_slotPresent[XUSER_MAX_COUNT];
++        const Uint32 now = SDL_GetTicks();
++        if (!s_lastSlotScan || SDL_TICKS_PASSED(now, s_lastSlotScan + 1000)) {
++            Uint8 userId;
++            for (userId = 0; userId < XUSER_MAX_COUNT; userId++) {
++                XINPUT_CAPABILITIES capabilities;
++                const DWORD result = XINPUTGETCAPABILITIES(userId, XINPUT_FLAG_GAMEPAD, &capabilities);
++                const SDL_bool available = (result == ERROR_SUCCESS) ? SDL_TRUE : SDL_FALSE;
++                if (s_slotPresent[userId] != available) {
++                    s_bWindowsDeviceChanged = SDL_TRUE;
++                    s_slotPresent[userId] = available;
++                }
++            }
++            s_lastSlotScan = now ? now : 1;
++        }
++    }
++#endif
++
+     /* only enum the devices if the joystick thread told us something changed */
+     if (!s_bWindowsDeviceChanged) {
+         return; /* thread hasn't signaled, nothing to do right now. */

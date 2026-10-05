@@ -36,7 +36,7 @@ add_library(audio_core STATIC EXCLUDE_FROM_ALL
     time_stretch.cpp
     time_stretch.h
 
-    $<$<BOOL:${ENABLE_SDL2}>:sdl2_sink.cpp sdl2_sink.h>
+    $<$<BOOL:${ENABLE_SDL2}>:sdl2_sink.cpp sdl2_sink.h sdl2_input.cpp sdl2_input.h>
     $<$<BOOL:${ENABLE_CUBEB}>:cubeb_sink.cpp cubeb_sink.h cubeb_input.cpp cubeb_input.h>
     $<$<BOOL:${ENABLE_LIBRETRO}>:libretro_sink.cpp libretro_sink.h libretro_input.cpp libretro_input.h>
     $<$<BOOL:${ENABLE_OPENAL}>:openal_input.cpp openal_input.h openal_sink.cpp openal_sink.h>
