@@ -10,6 +10,8 @@ add_executable(citra_uwp WIN32
     emulation_thread.h
     emu_window_uwp.cpp
     emu_window_uwp.h
+    keyboard_input.cpp
+    keyboard_input.h
     live_camera.cpp
     live_camera.h
     sdl_main_winrt.cpp

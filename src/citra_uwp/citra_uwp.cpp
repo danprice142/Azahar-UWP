@@ -40,6 +40,7 @@
 
 #include "citra_uwp/emu_window_uwp.h"
 #include "citra_uwp/emulation_thread.h"
+#include "citra_uwp/keyboard_input.h"
 #include "citra_uwp/live_camera.h"
 #include "citra_uwp/remote_library_server.h"
 #include "citra_uwp/screenscraper.h"
@@ -227,7 +228,9 @@ void SeedDefaultInputBindings() {
     }
 
     auto& profile = Settings::values.current_input_profile;
-    const auto is_bound = [](const std::string& binding) { return !binding.empty(); };
+    const auto is_bound = [](const std::string& binding) {
+        return !UWP::KeyboardInput::ButtonBinding(binding).empty();
+    };
     if (std::any_of(profile.buttons.begin(), profile.buttons.end(), is_bound) ||
         std::any_of(profile.analogs.begin(), profile.analogs.end(), is_bound)) {
         seeded = true;
@@ -267,7 +270,7 @@ void SeedDefaultInputBindings() {
             return params.Serialize();
         };
 
-        auto& buttons = profile.buttons;
+        decltype(profile.buttons) buttons{};
         buttons[Settings::NativeButton::A] = button(SDL_CONTROLLER_BUTTON_A);
         buttons[Settings::NativeButton::B] = button(SDL_CONTROLLER_BUTTON_B);
         buttons[Settings::NativeButton::X] = button(SDL_CONTROLLER_BUTTON_X);
@@ -283,10 +286,18 @@ void SeedDefaultInputBindings() {
         buttons[Settings::NativeButton::Start] = button(SDL_CONTROLLER_BUTTON_START);
         buttons[Settings::NativeButton::Select] = button(SDL_CONTROLLER_BUTTON_BACK);
         buttons[Settings::NativeButton::Home] = button(SDL_CONTROLLER_BUTTON_GUIDE);
-        profile.analogs[Settings::NativeAnalog::CirclePad] =
-            stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY);
-        profile.analogs[Settings::NativeAnalog::CStick] =
-            stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY);
+        for (std::size_t button_index = 0; button_index < buttons.size(); ++button_index) {
+            if (!buttons[button_index].empty()) {
+                UWP::KeyboardInput::SetButtonBinding(profile.buttons[button_index],
+                                                     buttons[button_index]);
+            }
+        }
+        UWP::KeyboardInput::SetAnalogBinding(
+            profile.analogs[Settings::NativeAnalog::CirclePad],
+            stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY));
+        UWP::KeyboardInput::SetAnalogBinding(
+            profile.analogs[Settings::NativeAnalog::CStick],
+            stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY));
 
         LOG_INFO(Frontend, "Seeded default input bindings from controller {}", guid);
         seeded = true;
@@ -554,6 +565,7 @@ struct RuntimeLifetime {
             Network::Shutdown();
         }
         if (input_started) {
+            UWP::KeyboardInput::Shutdown();
             InputCommon::Shutdown();
         }
         if (logging_started) {
@@ -596,6 +608,15 @@ int main(int argc, char** argv) {
         ApplyFirstBootStoragePaths();
         UWP::SaveConfig();
     }
+    // Profiles gain the desktop frontend's default keys once; keys cleared later stay cleared.
+    if (!UWP::values.keyboard_defaults_applied.GetValue()) {
+        for (auto& profile : Settings::values.input_profiles) {
+            UWP::KeyboardInput::ApplyDefaultKeys(profile, false);
+        }
+        UWP::KeyboardInput::ApplyDefaultKeys(Settings::values.current_input_profile, false);
+        UWP::values.keyboard_defaults_applied.SetValue(true);
+        UWP::SaveConfig();
+    }
 
     // Only OpenGL is available on this target.
     if (Settings::values.graphics_api.GetValue() != Settings::GraphicsAPI::OpenGL) {
@@ -625,6 +646,7 @@ int main(int argc, char** argv) {
         Settings::TouchFromButtonMap{"default", {}});
 
     InputCommon::Init();
+    UWP::KeyboardInput::Init();
     runtime.input_started = true;
 
     LOG_INFO(Frontend, "Azahar UWP starting");
@@ -1713,6 +1735,7 @@ int main(int argc, char** argv) {
                                              !frontend_dialog_open;
         emu_window.UpdateVirtualTouchCursor(gameplay_pointer_active);
         imgui.SetRemoteMouseForFrontend(!gameplay_pointer_active);
+        imgui.SetGameplayInputActive(gameplay_pointer_active);
 
         // OpenGLState's cache belongs to the worker context; set state on the primary directly.
         const auto& presentation_layout = emu_window.GetFramebufferLayout();
@@ -1739,6 +1762,11 @@ int main(int argc, char** argv) {
         imgui.BeginFrame(presentation_layout.width, presentation_layout.height);
 
         if (gameplay_pointer_active) {
+            float mouse_x = 0.0f;
+            float mouse_y = 0.0f;
+            if (emu_window.GetMouseCursor(mouse_x, mouse_y)) {
+                imgui.DrawMouseCursor(mouse_x, mouse_y);
+            }
             const auto cursor = emu_window.GetCursorInfo();
             const auto& cursor_layout = emu_window.GetFramebufferLayout();
             if (cursor.visible && cursor_layout.width != 0 && cursor_layout.height != 0) {
@@ -1778,9 +1806,16 @@ int main(int argc, char** argv) {
                                         menu_chord_devices[1]->GetStatus();
         const bool menu_chord_activated = menu_chord_pressed && !menu_chord_was_pressed;
         menu_chord_was_pressed = menu_chord_pressed;
+        // Escape opens the in-game menu from the keyboard; within menus it acts as Back.
+        const auto& key_presses = UWP::KeyboardInput::KeyPresses();
+        const bool escape_pressed =
+            gameplay_pointer_active &&
+            std::any_of(key_presses.begin(), key_presses.end(), [](const auto& press) {
+                return press.key == SDLK_ESCAPE && press.modifiers == 0;
+            });
         const bool menu_toggle_requested =
             !menu_input_blocked &&
-            ((frontend_menu_requested && !title_running) || menu_chord_activated);
+            ((frontend_menu_requested && !title_running) || menu_chord_activated || escape_pressed);
 
         UWP::MenuContext menu_context;
         menu_context.input_enabled = !frontend_dialog_open;
@@ -1879,9 +1914,149 @@ int main(int argc, char** argv) {
             l3_hold_fired = true;
         }
 
+        const auto run_hotkey = [&](UWP::ControllerHotkey hotkey) {
+            switch (hotkey) {
+            case UWP::ControllerHotkey::TogglePause:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::Pause;
+                }
+                break;
+            case UWP::ControllerHotkey::StopEmulation:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::Stop;
+                }
+                break;
+            case UWP::ControllerHotkey::QuickSave:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::QuickSave;
+                }
+                break;
+            case UWP::ControllerHotkey::QuickLoad:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::QuickLoad;
+                }
+                break;
+            case UWP::ControllerHotkey::CaptureScreenshot:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::CaptureScreenshot;
+                }
+                break;
+            case UWP::ControllerHotkey::SwapScreens:
+                // The L3 hold above already invokes this command; a direct L3 hotkey would
+                // fire it twice.
+                if (!l3_pressed) {
+                    menu_action = UWP::MenuAction::ScreenLayoutSwapScreens;
+                }
+                break;
+            case UWP::ControllerHotkey::RestartEmulation:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::Restart;
+                }
+                break;
+            case UWP::ControllerHotkey::AdvanceFrame:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::AdvanceFrame;
+                }
+                break;
+            case UWP::ControllerHotkey::ToggleUprightScreens:
+                menu_action = UWP::MenuAction::ScreenLayoutUprightScreens;
+                break;
+            case UWP::ControllerHotkey::CycleLayout:
+                menu_action = UWP::MenuAction::ScreenLayoutCycle;
+                break;
+            case UWP::ControllerHotkey::ToggleMute:
+                Settings::values.audio_muted = !Settings::values.audio_muted;
+                break;
+            case UWP::ControllerHotkey::IncreaseSpeed:
+                Settings::values.frame_limit.SetValue(
+                    std::min(1000.0, Settings::values.frame_limit.GetValue() + 5.0));
+                UWP::SaveConfig();
+                break;
+            case UWP::ControllerHotkey::DecreaseSpeed:
+                Settings::values.frame_limit.SetValue(
+                    std::max(5.0, Settings::values.frame_limit.GetValue() - 5.0));
+                UWP::SaveConfig();
+                break;
+            case UWP::ControllerHotkey::ResetSpeed:
+                Settings::values.frame_limit.SetValue(100.0);
+                UWP::SaveConfig();
+                break;
+            case UWP::ControllerHotkey::Increase3D: {
+                const u32 factor = Settings::values.factor_3d.GetValue();
+                Settings::values.factor_3d.SetValue(std::min<u32>(255, factor + 5 - (factor % 5)));
+                UWP::SaveConfig();
+                break;
+            }
+            case UWP::ControllerHotkey::Decrease3D: {
+                const u32 factor = Settings::values.factor_3d.GetValue();
+                Settings::values.factor_3d.SetValue(
+                    factor == 0 ? 0
+                                : factor - std::min<u32>(factor, factor % 5 == 0 ? 5 : factor % 5));
+                UWP::SaveConfig();
+                break;
+            }
+            case UWP::ControllerHotkey::LoadFile:
+                menu_action = UWP::MenuAction::LoadFile;
+                break;
+            case UWP::ControllerHotkey::Exit:
+                menu_action = UWP::MenuAction::Exit;
+                break;
+            case UWP::ControllerHotkey::LoadAmiibo:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::LoadAmiibo;
+                }
+                break;
+            case UWP::ControllerHotkey::RemoveAmiibo:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::RemoveAmiibo;
+                }
+                break;
+            case UWP::ControllerHotkey::SaveToOldestSlot:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::SaveToOldestSlot;
+                }
+                break;
+            case UWP::ControllerHotkey::LoadFromNewestSlot:
+                if (title_running) {
+                    menu_action = UWP::MenuAction::LoadFromNewestSlot;
+                }
+                break;
+            case UWP::ControllerHotkey::ToggleFilterBar:
+                if (game_list_visible) {
+                    menu_action = UWP::MenuAction::SearchGameList;
+                }
+                break;
+            case UWP::ControllerHotkey::ToggleStatusBar:
+                menu_action = UWP::MenuAction::ShowStatusBar;
+                break;
+            case UWP::ControllerHotkey::ToggleCustomTextures:
+                Settings::values.custom_textures = !Settings::values.custom_textures;
+                break;
+            case UWP::ControllerHotkey::BrowsePublicRooms:
+                menu_action = UWP::MenuAction::ViewLobby;
+                break;
+            case UWP::ControllerHotkey::CreateRoom:
+                menu_action = UWP::MenuAction::StartRoom;
+                break;
+            case UWP::ControllerHotkey::LeaveRoom:
+                if (multiplayer.IsInRoom()) {
+                    menu_action = UWP::MenuAction::LeaveRoom;
+                }
+                break;
+            case UWP::ControllerHotkey::ShowCurrentRoom:
+                if (multiplayer.IsInRoom()) {
+                    menu_action = UWP::MenuAction::ShowRoom;
+                }
+                break;
+            default:
+                break;
+            }
+        };
+
         // Suppressed while the configure dialog is open so a rebind press cannot fire a hotkey.
         if (menu_action == UWP::MenuAction::None && !configure.IsOpen() &&
             !preparing_loaded_title && !pending_boot) {
+            bool hotkey_fired = false;
             for (std::size_t i = 0; i < num_hotkeys; ++i) {
                 if (!hotkey_devices[i]) {
                     continue;
@@ -1892,97 +2067,25 @@ int main(int argc, char** argv) {
                 if (!fired) {
                     continue;
                 }
-                switch (static_cast<UWP::ControllerHotkey>(i)) {
-                case UWP::ControllerHotkey::TogglePause:
-                    if (title_running) {
-                        menu_action = UWP::MenuAction::Pause;
-                    }
-                    break;
-                case UWP::ControllerHotkey::StopEmulation:
-                    if (title_running) {
-                        menu_action = UWP::MenuAction::Stop;
-                    }
-                    break;
-                case UWP::ControllerHotkey::QuickSave:
-                    if (title_running) {
-                        menu_action = UWP::MenuAction::QuickSave;
-                    }
-                    break;
-                case UWP::ControllerHotkey::QuickLoad:
-                    if (title_running) {
-                        menu_action = UWP::MenuAction::QuickLoad;
-                    }
-                    break;
-                case UWP::ControllerHotkey::CaptureScreenshot:
-                    if (title_running) {
-                        menu_action = UWP::MenuAction::CaptureScreenshot;
-                    }
-                    break;
-                case UWP::ControllerHotkey::SwapScreens:
-                    // The L3 hold above already invokes this command; a direct L3 hotkey would
-                    // fire it twice.
-                    if (!l3_pressed) {
-                        menu_action = UWP::MenuAction::ScreenLayoutSwapScreens;
-                    }
-                    break;
-                case UWP::ControllerHotkey::RestartEmulation:
-                    if (title_running) {
-                        menu_action = UWP::MenuAction::Restart;
-                    }
-                    break;
-                case UWP::ControllerHotkey::AdvanceFrame:
-                    if (title_running) {
-                        menu_action = UWP::MenuAction::AdvanceFrame;
-                    }
-                    break;
-                case UWP::ControllerHotkey::ToggleUprightScreens:
-                    menu_action = UWP::MenuAction::ScreenLayoutUprightScreens;
-                    break;
-                case UWP::ControllerHotkey::CycleLayout:
-                    menu_action = UWP::MenuAction::ScreenLayoutCycle;
-                    break;
-                case UWP::ControllerHotkey::ToggleMute:
-                    Settings::values.audio_muted = !Settings::values.audio_muted;
-                    break;
-                case UWP::ControllerHotkey::IncreaseSpeed:
-                    Settings::values.frame_limit.SetValue(
-                        std::min(1000.0, Settings::values.frame_limit.GetValue() + 5.0));
-                    UWP::SaveConfig();
-                    break;
-                case UWP::ControllerHotkey::DecreaseSpeed:
-                    Settings::values.frame_limit.SetValue(
-                        std::max(5.0, Settings::values.frame_limit.GetValue() - 5.0));
-                    UWP::SaveConfig();
-                    break;
-                case UWP::ControllerHotkey::ResetSpeed:
-                    Settings::values.frame_limit.SetValue(100.0);
-                    UWP::SaveConfig();
-                    break;
-                case UWP::ControllerHotkey::Increase3D: {
-                    const u32 factor = Settings::values.factor_3d.GetValue();
-                    Settings::values.factor_3d.SetValue(
-                        std::min<u32>(255, factor + 5 - (factor % 5)));
-                    UWP::SaveConfig();
-                    break;
-                }
-                case UWP::ControllerHotkey::Decrease3D: {
-                    const u32 factor = Settings::values.factor_3d.GetValue();
-                    Settings::values.factor_3d.SetValue(
-                        factor == 0
-                            ? 0
-                            : factor - std::min<u32>(factor, factor % 5 == 0 ? 5 : factor % 5));
-                    UWP::SaveConfig();
-                    break;
-                }
-                default:
-                    break;
-                }
+                run_hotkey(static_cast<UWP::ControllerHotkey>(i));
+                hotkey_fired = true;
                 break; // At most one hotkey fires per frame.
             }
+            // Text fields keep their own editing shortcuts.
+            if (!hotkey_fired && !ImGui::GetIO().WantTextInput) {
+                const auto& chords = UWP::values.keyboard_hotkeys;
+                for (const auto& press : key_presses) {
+                    const auto match =
+                        std::find_if(chords.begin(), chords.end(), [&press](const auto& chord) {
+                            return !chord.empty() && UWP::KeyboardInput::ChordMatches(chord, press);
+                        });
+                    if (match != chords.end()) {
+                        run_hotkey(static_cast<UWP::ControllerHotkey>(match - chords.begin()));
+                        break;
+                    }
+                }
+            }
         }
-
-        // Local keyboard/mouse input is not a control path; SDL text events serve the on-screen
-        // keyboard.
 
         const auto remember_menu_page = [&](UWP::MenuAction action) {
             menu_return_action = action;

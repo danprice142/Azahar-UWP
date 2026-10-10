@@ -18,6 +18,7 @@
 #include <SDL.h>
 #include <fmt/format.h>
 
+#include "citra_uwp/keyboard_input.h"
 #include "citra_uwp/storage_paths.h"
 #include "citra_uwp/uwp_config.h"
 #include "citra_uwp/uwp_settings.h"
@@ -365,20 +366,23 @@ void NormalizeInputSettings(Settings::InputProfile& profile) {
 
     // Only SDL game controllers and DSU are supported; drop desktop input engines from copied
     // configs.
-    const auto keep_supported = [](std::string& binding, bool button) {
+    const auto keep_supported = [](const std::string& binding, bool button) {
         if (binding.empty()) {
-            return;
+            return binding;
         }
         const Common::ParamPackage params{binding};
         if (button ? !IsSupportedButtonBinding(params) : !IsSupportedAnalogBinding(params)) {
-            binding.clear();
+            return std::string{};
         }
+        return binding;
     };
     for (auto& binding : profile.buttons) {
-        keep_supported(binding, true);
+        KeyboardInput::SetButtonBinding(
+            binding, keep_supported(KeyboardInput::ButtonBinding(binding), true));
     }
     for (auto& binding : profile.analogs) {
-        keep_supported(binding, false);
+        KeyboardInput::SetAnalogBinding(
+            binding, keep_supported(KeyboardInput::AnalogBinding(binding), false));
     }
 }
 
@@ -1083,6 +1087,15 @@ void LoadConfig() {
             values.controller_hotkeys[i].clear();
         }
     }
+    for (std::size_t i = 0; i < values.keyboard_hotkeys.size(); ++i) {
+        values.keyboard_hotkeys[i] =
+            ini->Get("UWP", fmt::format("keyboard_hotkey_{}", i), values.keyboard_hotkeys[i]);
+        if (!values.keyboard_hotkeys[i].empty() &&
+            !KeyboardInput::ParseChord(values.keyboard_hotkeys[i])) {
+            values.keyboard_hotkeys[i].clear();
+        }
+    }
+    Read("UWP", values.keyboard_defaults_applied);
     for (std::size_t i = 0; i < values.in_game_menu_chord.size(); ++i) {
         const std::string key = fmt::format("in_game_menu_chord_{}", i);
         values.in_game_menu_chord[i] = ini->Get("UWP", key.c_str(), values.in_game_menu_chord[i]);
@@ -1359,6 +1372,10 @@ void SaveConfig() {
     for (std::size_t i = 0; i < values.controller_hotkeys.size(); ++i) {
         WriteRaw(out, fmt::format("controller_hotkey_{}", i), values.controller_hotkeys[i]);
     }
+    for (std::size_t i = 0; i < values.keyboard_hotkeys.size(); ++i) {
+        WriteRaw(out, fmt::format("keyboard_hotkey_{}", i), values.keyboard_hotkeys[i]);
+    }
+    Write(out, values.keyboard_defaults_applied);
     for (std::size_t i = 0; i < values.in_game_menu_chord.size(); ++i) {
         WriteRaw(out, fmt::format("in_game_menu_chord_{}", i), values.in_game_menu_chord[i]);
     }

@@ -33,8 +33,13 @@ public:
     void SetRemoteMouseForFrontend(bool enabled) {
         remote_mouse_for_frontend = enabled;
     }
+    /// Leaves local keyboard and mouse events to the emulated console during gameplay.
+    void SetGameplayInputActive(bool active);
 
     void FocusMainMenuBar();
+
+    /// Draws an arrow cursor at a window position, for the mouse during gameplay.
+    void DrawMouseCursor(float x, float y);
 
     /// Restores controller navigation focus when no item holds it.
     void EnsureNavFocus();
@@ -66,7 +71,7 @@ private:
 
     void HandleConsoleNavigation();
 
-    void ApplyLeftStickAsDpad();
+    void UpdateNavInputs();
 
     void RefreshGamepad();
 
@@ -92,6 +97,13 @@ private:
     bool remote_mouse_for_frontend = true;
     unsigned long long remote_keyboard_sequence = 0;
     std::array<u32, 11> remote_keyboard_bitmap{};
+    bool gameplay_input_active = false;
+    bool local_mouse_active = false;
+    bool mouse_visible = false;
+    float wheel_scroll = 0.0f;
+    bool keyboard_nav_enabled = false;
+    bool keyboard_nav_latched = false;
+    bool nav_input_down = false;
 };
 
 } // namespace UWP

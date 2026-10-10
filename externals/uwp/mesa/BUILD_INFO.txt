@@ -14,21 +14,26 @@ The following Azahar patches are applied to that exact revision, in this order:
     azahar-output-size.patch
     azahar-frame-latency.patch
     azahar-pso-failure.patch
+    azahar-xbox-uav-cast.patch
+    azahar-logic-op-formats.patch
 
 Their preimage blob IDs match the source commit:
 
     6624c2ceaa02c8311a2acedd1583fdecd05279be  src/util/uwp_util.cpp
     be5a43c72e2171ccd392693b26dd826a545b6181  src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer_uwp.cpp
     7dab6a24ecea35a3f268260ccdd59000873bf8e6  src/gallium/drivers/d3d12/d3d12_pipeline_state.cpp
+    c6ee1e19aaceb819c644b82b20e3ad4b2bca2cc6  src/gallium/drivers/d3d12/d3d12_pipeline_state.h
     d9388c71ef15178f8f380a0de2e47caba60a93c4  src/gallium/drivers/d3d12/d3d12_draw.cpp
+    25379649272b9d7ceb1bf83d1972862760ec4f12  src/gallium/drivers/d3d12/d3d12_resource.cpp
+    a2012e97d583b8ed2192b75a0757edd6ff3a2164  src/gallium/drivers/d3d12/d3d12_context_graphics.cpp
 
 The archive contains only the runtime and import libraries used by Azahar. Its SHA-256 is:
 
-    AA206F0547291254AE986C723E62A68B1CAC2CBDAD08C94DEC593A3640A0BF43
+    DECA3C7BE1886A669EF14584DB8A1EBE9329CCC9FE8B84E0CE1C74F220709A5B
 
 Payload SHA-256:
 
-    260FDF74AB39322075B8BC5B7FCD0968820FC3ACB20E10FB319B852102E3488D  bin/libgallium_wgl.dll
+    203043939872287C1B8D0B2196FB930DFE67BE335D62EEF8467B497D93BA1227  bin/libgallium_wgl.dll
     E6D2F814B3EB7528E8A13CD03AFEFC11169DA679639B88F70B5D7162C826C571  bin/opengl32.dll
     0CFA1E87256415D907AD44609151CFDCDAD7A0E83A7404E6475B01E8A9263FDF  bin/z-1.dll
     790C98459552D2AD067BB31101D98F7F7C3E613EF433FF43A3C9A4564DE26E49  lib/libgallium_wgl.lib

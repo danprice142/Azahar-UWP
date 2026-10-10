@@ -279,11 +279,14 @@ void Client::OnPortInfo(Response::PortInfo data) {
 void Client::OnPadData(Response::PadData data) {
     LOG_TRACE(Input, "PadData packet received");
     const u32 incoming_sequence = data.packet_counter;
-    // Treat the counter as a wrapping 32-bit sequence number.
+    // Treat the counter as a wrapping 32-bit sequence number. A large backward jump means the
+    // server restarted its counter, so only duplicates and recently reordered packets are stale.
+    constexpr u32 max_reorder_distance = 1024;
     const u32 sequence_delta =
         packet_sequence ? incoming_sequence - *packet_sequence : std::numeric_limits<u32>::max();
     if (packet_sequence &&
-        (sequence_delta == 0 || sequence_delta > std::numeric_limits<s32>::max())) {
+        (sequence_delta == 0 || (sequence_delta > std::numeric_limits<s32>::max() &&
+                                 *packet_sequence - incoming_sequence <= max_reorder_distance))) {
         LOG_WARNING(
             Input,
             "PadData packet dropped because its stale info. Current count: {} Packet count: {}",

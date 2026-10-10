@@ -572,6 +572,7 @@ void ConfigureDialog::Draw(Core::System& system) {
         // Binding capture is polled here so Controller Hotkeys work while the Input tab is
         // visible.
         UpdatePolling();
+        UpdateKeyCapture();
 
         if (per_game_mode) {
             ImGui::TextDisabled("Only settings which support per-application overrides are shown.");
@@ -1749,15 +1750,79 @@ void ConfigureDialog::StopPolling() {
         poller->Stop();
     }
     pollers.clear();
+    key_capture = KeyCaptureTarget::None;
+    key_capture_index = -1;
+    KeyboardInput::SetKeyCaptureActive(false);
+}
+
+void ConfigureDialog::StartKeyCapture(KeyCaptureTarget target, int index) {
+    StopPolling();
+    polling_button = -1;
+    polling_analog = -1;
+    polling_hotkey = -1;
+    polling_menu_chord = -1;
+    polling_auto_map = false;
+    key_capture = target;
+    key_capture_index = index;
+    key_capture_step = 0;
+    if (target == KeyCaptureTarget::Analog) {
+        key_capture_analog = KeyboardInput::AnalogKeysOf(
+            Settings::values.current_input_profile.analogs[static_cast<std::size_t>(index)]);
+    }
+    KeyboardInput::SetKeyCaptureActive(true);
+    binding_capture_popup_pending = true;
+}
+
+void ConfigureDialog::UpdateKeyCapture() {
+    if (key_capture == KeyCaptureTarget::None) {
+        return;
+    }
+    auto& profile = Settings::values.current_input_profile;
+    const auto index = static_cast<std::size_t>(key_capture_index);
+    for (const auto& press : KeyboardInput::KeyPresses()) {
+        if (KeyboardInput::IsModifierKey(press.key)) {
+            continue;
+        }
+        // As in the desktop frontend, Escape cancels; Backspace clears the key.
+        if (press.key == SDLK_ESCAPE) {
+            StopPolling();
+            return;
+        }
+        const s32 key = press.key == SDLK_BACKSPACE ? 0 : press.key;
+        switch (key_capture) {
+        case KeyCaptureTarget::Button:
+            KeyboardInput::SetButtonKey(profile.buttons[index], key);
+            break;
+        case KeyCaptureTarget::Hotkey:
+            UWP::values.keyboard_hotkeys[index] =
+                key == 0 ? std::string{} : KeyboardInput::ChordText(press);
+            break;
+        case KeyCaptureTarget::Analog:
+            if (key == 0) {
+                KeyboardInput::SetAnalogKeys(profile.analogs[index], {});
+                break;
+            }
+            key_capture_analog.keys[key_capture_step++] = key;
+            if (key_capture_step < key_capture_analog.keys.size()) {
+                continue;
+            }
+            KeyboardInput::SetAnalogKeys(profile.analogs[index], key_capture_analog);
+            break;
+        default:
+            break;
+        }
+        StopPolling();
+        return;
+    }
 }
 
 bool ConfigureDialog::IsBindingCaptureActive() const {
     return polling_button >= 0 || polling_analog >= 0 || polling_hotkey >= 0 ||
-           polling_menu_chord >= 0 || polling_auto_map;
+           polling_menu_chord >= 0 || polling_auto_map || key_capture != KeyCaptureTarget::None;
 }
 
 void ConfigureDialog::DrawBindingCapturePopup() {
-    constexpr const char* popup_name = "Waiting for controller input";
+    constexpr const char* popup_name = "Waiting for input";
     if (binding_capture_popup_pending) {
         ImGui::OpenPopup(popup_name);
         binding_capture_popup_pending = false;
@@ -1773,6 +1838,13 @@ void ConfigureDialog::DrawBindingCapturePopup() {
         // Closing here keeps the same press inside the modal so it cannot activate the control
         // beneath.
         ImGui::CloseCurrentPopup();
+    } else if (key_capture == KeyCaptureTarget::Analog) {
+        static constexpr std::array directions{"up", "down", "left", "right", "modifier"};
+        ImGui::Text("Press the key for %s.", directions[key_capture_step]);
+    } else if (key_capture == KeyCaptureTarget::Hotkey) {
+        ImGui::TextUnformatted("Press the key combination to use for this command.");
+    } else if (key_capture == KeyCaptureTarget::Button) {
+        ImGui::TextUnformatted("Press the key to use for this control.");
     } else if (polling_analog >= 0) {
         ImGui::TextUnformatted("Move the stick to use for this control.");
     } else if (polling_auto_map) {
@@ -1782,7 +1854,9 @@ void ConfigureDialog::DrawBindingCapturePopup() {
     }
     if (IsBindingCaptureActive()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("This input will not operate the settings page underneath.");
+        ImGui::TextDisabled(key_capture != KeyCaptureTarget::None
+                                ? "Esc cancels. Backspace clears the key."
+                                : "This input will not operate the settings page underneath.");
     }
     ImGui::EndPopup();
 }
@@ -1801,18 +1875,22 @@ void ConfigureDialog::ApplyMappingScope() {
         break;
     }
 
-    const auto update = [maptype](std::string& binding) {
-        Common::ParamPackage params{binding};
+    const auto update = [maptype](std::string& binding, bool button) {
+        Common::ParamPackage params{KeyboardInput::ButtonBinding(binding)};
         if (params.Get("engine", "") == "sdl") {
             params.Set("maptype", maptype);
-            binding = params.Serialize();
+            if (button) {
+                KeyboardInput::SetButtonBinding(binding, params.Serialize());
+            } else {
+                KeyboardInput::SetAnalogBinding(binding, params.Serialize());
+            }
         }
     };
     for (auto& binding : profile.buttons) {
-        update(binding);
+        update(binding, true);
     }
     for (auto& binding : profile.analogs) {
-        update(binding);
+        update(binding, false);
     }
 }
 
@@ -1823,26 +1901,30 @@ bool ConfigureDialog::MapController(const Common::ParamPackage& controller) {
 
     bool mapped = false;
     auto& profile = Settings::values.current_input_profile;
+    decltype(profile.buttons) buttons{};
     for (int i = 0; i < Settings::NativeButton::NumButtons; ++i) {
         Common::ParamPackage binding = InputCommon::GetControllerButtonBinds(controller, i);
         if (binding.Has("engine")) {
-            profile.buttons[i] = binding.Serialize();
-            mapped = true;
+            buttons[i] = binding.Serialize();
         }
     }
     // InputCommon's XInput preset is Nintendo-positioned; swap the face-button pairs to match
     // labels.
-    std::swap(profile.buttons[Settings::NativeButton::A],
-              profile.buttons[Settings::NativeButton::B]);
-    std::swap(profile.buttons[Settings::NativeButton::X],
-              profile.buttons[Settings::NativeButton::Y]);
+    std::swap(buttons[Settings::NativeButton::A], buttons[Settings::NativeButton::B]);
+    std::swap(buttons[Settings::NativeButton::X], buttons[Settings::NativeButton::Y]);
+    for (std::size_t i = 0; i < buttons.size(); ++i) {
+        if (!buttons[i].empty()) {
+            KeyboardInput::SetButtonBinding(profile.buttons[i], buttons[i]);
+            mapped = true;
+        }
+    }
     for (int i = 0; i < Settings::NativeAnalog::NumAnalogs; ++i) {
         Common::ParamPackage binding = InputCommon::GetControllerAnalogBinds(controller, i);
         if (binding.Has("engine")) {
             if (!binding.Has("deadzone")) {
                 binding.Set("deadzone", 0.1f);
             }
-            profile.analogs[i] = binding.Serialize();
+            KeyboardInput::SetAnalogBinding(profile.analogs[i], binding.Serialize());
             mapped = true;
         }
     }
@@ -1882,9 +1964,11 @@ void ConfigureDialog::UpdatePolling() {
                 continue;
             }
         } else if (polling_analog >= 0) {
-            profile.analogs[static_cast<std::size_t>(polling_analog)] = params.Serialize();
+            KeyboardInput::SetAnalogBinding(
+                profile.analogs[static_cast<std::size_t>(polling_analog)], params.Serialize());
         } else if (polling_button >= 0) {
-            profile.buttons[static_cast<std::size_t>(polling_button)] = params.Serialize();
+            KeyboardInput::SetButtonBinding(
+                profile.buttons[static_cast<std::size_t>(polling_button)], params.Serialize());
         } else if (polling_hotkey >= 0) {
             UWP::values.controller_hotkeys[static_cast<std::size_t>(polling_hotkey)] =
                 params.Serialize();
@@ -2012,18 +2096,29 @@ void ConfigureDialog::DrawInputTab() {
         xbox.Set("button", SDL_CONTROLLER_BUTTON_B);
         MapController(xbox);
     }
+    if (ImGui::Button("Restore keyboard defaults")) {
+        StopPolling();
+        polling_button = -1;
+        polling_analog = -1;
+        polling_hotkey = -1;
+        polling_menu_chord = -1;
+        polling_auto_map = false;
+        KeyboardInput::ApplyDefaultKeys(profile, true);
+    }
+    Tooltip("Restores the desktop frontend's default keys. Controller bindings are kept.");
     if (ImGui::Button("Add DSU to Xbox mappings")) {
         using DsuButton = InputCommon::CemuhookUDP::Button;
         using DsuAxis = InputCommon::CemuhookUDP::Axis;
         const auto add_button = [&](Settings::NativeButton::Values native, DsuButton remote) {
-            std::string local = profile.buttons[native];
+            std::string local = KeyboardInput::ButtonBinding(profile.buttons[native]);
             const Common::ParamPackage current{local};
             if (current.Get("engine", "") == "cemuhookudp_addon") {
                 local = current.Get("local", "");
             }
             if (!local.empty()) {
-                profile.buttons[native] =
-                    InputCommon::CemuhookUDP::GenerateAddonButtonParam(local, remote).Serialize();
+                KeyboardInput::SetButtonBinding(
+                    profile.buttons[native],
+                    InputCommon::CemuhookUDP::GenerateAddonButtonParam(local, remote).Serialize());
             }
         };
         add_button(Settings::NativeButton::A, DsuButton::A);
@@ -2042,14 +2137,15 @@ void ConfigureDialog::DrawInputTab() {
         add_button(Settings::NativeButton::Select, DsuButton::Share);
         add_button(Settings::NativeButton::Home, DsuButton::Home);
         const auto add_analog = [&](Settings::NativeAnalog::Values native, DsuAxis x, DsuAxis y) {
-            std::string local = profile.analogs[native];
+            std::string local = KeyboardInput::AnalogBinding(profile.analogs[native]);
             const Common::ParamPackage current{local};
             if (current.Get("engine", "") == "cemuhookudp_addon") {
                 local = current.Get("local", "");
             }
             if (!local.empty()) {
-                profile.analogs[native] =
-                    InputCommon::CemuhookUDP::GenerateAddonAnalogParam(local, x, y).Serialize();
+                KeyboardInput::SetAnalogBinding(
+                    profile.analogs[native],
+                    InputCommon::CemuhookUDP::GenerateAddonAnalogParam(local, x, y).Serialize());
             }
         };
         add_analog(Settings::NativeAnalog::CirclePad, DsuAxis::LeftX, DsuAxis::LeftY);
@@ -2067,8 +2163,9 @@ void ConfigureDialog::DrawInputTab() {
         using DsuButton = InputCommon::CemuhookUDP::Button;
         using DsuAxis = InputCommon::CemuhookUDP::Axis;
         const auto button = [&](Settings::NativeButton::Values native, DsuButton remote) {
-            profile.buttons[native] =
-                InputCommon::CemuhookUDP::GenerateButtonParam(remote).Serialize();
+            KeyboardInput::SetButtonBinding(
+                profile.buttons[native],
+                InputCommon::CemuhookUDP::GenerateButtonParam(remote).Serialize());
         };
 
         button(Settings::NativeButton::A, DsuButton::A);
@@ -2086,18 +2183,21 @@ void ConfigureDialog::DrawInputTab() {
         button(Settings::NativeButton::Start, DsuButton::Options);
         button(Settings::NativeButton::Select, DsuButton::Share);
         button(Settings::NativeButton::Home, DsuButton::Home);
-        profile.analogs[Settings::NativeAnalog::CirclePad] =
+        KeyboardInput::SetAnalogBinding(
+            profile.analogs[Settings::NativeAnalog::CirclePad],
             InputCommon::CemuhookUDP::GenerateAnalogParam(DsuAxis::LeftX, DsuAxis::LeftY)
-                .Serialize();
-        profile.analogs[Settings::NativeAnalog::CStick] =
+                .Serialize());
+        KeyboardInput::SetAnalogBinding(
+            profile.analogs[Settings::NativeAnalog::CStick],
             InputCommon::CemuhookUDP::GenerateAnalogParam(DsuAxis::RightX, DsuAxis::RightY)
-                .Serialize();
+                .Serialize());
     }
     Tooltip("Full mode switches the standard 3DS controls to the selected network DSU pad. "
             "Individual rows can still be rebound.");
     ImGui::TextDisabled(
-        "Xbox gamepads use SDL/WGI. Remote DSU buttons and sticks may be mapped below. Local "
-        "keyboard, mouse, touch, and motion hardware are never accepted.");
+        "Xbox gamepads use SDL/WGI. Remote DSU buttons and sticks may be mapped below. Each "
+        "control also takes a keyboard key. During gameplay the left mouse button touches the "
+        "bottom screen and Esc opens the menu.");
 
     GroupHeader("Face buttons");
     DrawButtonRow("A", Settings::NativeButton::A);
@@ -2150,7 +2250,7 @@ void ConfigureDialog::DrawInputTab() {
     ImGui::TextWrapped(
         "Buttons, sticks, touchscreen, and motion can be received from a Cemuhook/DSU server. A "
         "phone or PC server may translate its touch, mouse, keyboard, or sensors into those DSU "
-        "controls; Azahar never reads that hardware locally on Xbox.");
+        "controls.");
 
     std::array<char, 64> address{};
     const auto address_length = std::min(profile.udp_input_address.size(), address.size() - 1);
@@ -2264,11 +2364,13 @@ void ConfigureDialog::DrawButtonRow(const char* label, int button_index) {
     ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
 
     const bool awaiting = polling_button == button_index && polling_analog < 0;
+    const std::string controller = KeyboardInput::ButtonBinding(binding);
     const std::string binding_text =
-        binding.empty() ? std::string{} : InputCommon::ButtonToText(Common::ParamPackage{binding});
-    const char* caption = awaiting          ? "[press a button]"
-                          : binding.empty() ? "[not set]"
-                                            : binding_text.c_str();
+        controller.empty() ? std::string{}
+                           : InputCommon::ButtonToText(Common::ParamPackage{controller});
+    const char* caption = awaiting             ? "[press a button]"
+                          : controller.empty() ? "[not set]"
+                                               : binding_text.c_str();
     if (ImGui::Button(caption, ImVec2(ImGui::GetFontSize() * 18.0f, 0.0f))) {
         // Capture mode: the event pump writes the next input it sees into this slot.
         polling_button = awaiting ? -1 : button_index;
@@ -2283,8 +2385,22 @@ void ConfigureDialog::DrawButtonRow(const char* label, int button_index) {
         }
     }
     ImGui::SameLine();
+    const bool awaiting_key =
+        key_capture == KeyCaptureTarget::Button && key_capture_index == button_index;
+    const s32 key = KeyboardInput::ButtonKey(binding);
+    const std::string key_caption = fmt::format(
+        "{}###key",
+        awaiting_key ? "[press a key]" : (key == 0 ? "[no key]" : KeyboardInput::KeyName(key)));
+    if (ImGui::Button(key_caption.c_str(), ImVec2(ImGui::GetFontSize() * 8.0f, 0.0f))) {
+        if (awaiting_key) {
+            StopPolling();
+        } else {
+            StartKeyCapture(KeyCaptureTarget::Button, button_index);
+        }
+    }
+    ImGui::SameLine();
     if (ImGui::SmallButton("Clear")) {
-        binding.clear();
+        KeyboardInput::SetButtonBinding(binding, {});
     }
     ImGui::PopID();
 }
@@ -2299,16 +2415,17 @@ void ConfigureDialog::DrawAnalogRow(const char* label, int analog_index) {
     ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
 
     const bool awaiting = polling_analog == analog_index;
+    const std::string controller = KeyboardInput::AnalogBinding(binding);
     std::string binding_text;
-    if (!binding.empty()) {
-        const Common::ParamPackage params{binding};
+    if (!controller.empty()) {
+        const Common::ParamPackage params{controller};
         const std::string axis_x = params.Get("name_x", "Axis " + params.Get("axis_x", ""));
         const std::string axis_y = params.Get("name_y", "Axis " + params.Get("axis_y", ""));
         binding_text = axis_x + " / " + axis_y;
     }
-    const char* caption = awaiting          ? "[move a stick]"
-                          : binding.empty() ? "[not set]"
-                                            : binding_text.c_str();
+    const char* caption = awaiting             ? "[move a stick]"
+                          : controller.empty() ? "[not set]"
+                                               : binding_text.c_str();
     if (ImGui::Button(caption, ImVec2(ImGui::GetFontSize() * 18.0f, 0.0f))) {
         polling_analog = awaiting ? -1 : analog_index;
         polling_button = -1;
@@ -2322,18 +2439,43 @@ void ConfigureDialog::DrawAnalogRow(const char* label, int analog_index) {
         }
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Clear")) {
-        binding.clear();
+    const bool awaiting_keys =
+        key_capture == KeyCaptureTarget::Analog && key_capture_index == analog_index;
+    const KeyboardInput::AnalogKeys keys = KeyboardInput::AnalogKeysOf(binding);
+    std::string keys_text = "[no keys]";
+    if (awaiting_keys) {
+        keys_text = "[press keys]";
+    } else if (keys.keys[0] != 0) {
+        keys_text =
+            fmt::format("{} {} {} {}", KeyboardInput::KeyName(keys.keys[0]),
+                        KeyboardInput::KeyName(keys.keys[1]), KeyboardInput::KeyName(keys.keys[2]),
+                        KeyboardInput::KeyName(keys.keys[3]));
+        if (keys.keys[4] != 0) {
+            keys_text += fmt::format(" ({})", KeyboardInput::KeyName(keys.keys[4]));
+        }
     }
-    if (!binding.empty()) {
-        Common::ParamPackage params{binding};
+    if (ImGui::Button(fmt::format("{}###keys", keys_text).c_str(),
+                      ImVec2(ImGui::GetFontSize() * 12.0f, 0.0f))) {
+        if (awaiting_keys) {
+            StopPolling();
+        } else {
+            StartKeyCapture(KeyCaptureTarget::Analog, analog_index);
+        }
+    }
+    Tooltip("Keys for up, down, left and right, then a modifier key that halves the deflection.");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear")) {
+        KeyboardInput::SetAnalogBinding(binding, {});
+    }
+    if (!controller.empty()) {
+        Common::ParamPackage params{controller};
         const std::string engine = params.Get("engine", "");
         if (engine == "sdl" || engine == "cemuhookudp") {
             int deadzone = static_cast<int>(params.Get("deadzone", 0.1f) * 100.0f);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
             if (ImGui::SliderInt("Deadzone", &deadzone, 0, 95, "%d%%")) {
                 params.Set("deadzone", deadzone / 100.0f);
-                binding = params.Serialize();
+                KeyboardInput::SetAnalogBinding(binding, params.Serialize());
             }
         }
     }
@@ -2344,7 +2486,7 @@ void ConfigureDialog::DrawControllerHotkeysTab() {
     GroupHeader("In-game menu chord");
     ImGui::TextWrapped(
         "Both bindings must be held together. Start by itself remains the emulated 3DS Start "
-        "button. The default is View/Select + Menu/Start.");
+        "button. The default is View/Select + Menu/Start. On a keyboard, Esc opens the menu.");
     constexpr std::array chord_labels{"First button", "Second button"};
     for (std::size_t i = 0; i < UWP::values.in_game_menu_chord.size(); ++i) {
         ImGui::PushID(static_cast<int>(7000 + i));
@@ -2388,15 +2530,17 @@ void ConfigureDialog::DrawControllerHotkeysTab() {
 
     GroupHeader("Controller hotkeys");
     ImGui::TextDisabled(
-        "Bind native Xbox or remote DSU pad inputs to frontend commands. They fire any time, "
-        "including during gameplay.");
+        "Bind native Xbox or remote DSU pad inputs, or keyboard keys, to frontend commands. They "
+        "fire any time, including during gameplay.");
 
-    if (!ImGui::BeginTable("##controller_hotkeys", 3,
+    if (!ImGui::BeginTable("##controller_hotkeys", 4,
                            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
         return;
     }
     ImGui::TableSetupColumn("Command");
     ImGui::TableSetupColumn("Binding");
+    ImGui::TableSetupColumn("Keyboard", ImGuiTableColumnFlags_WidthFixed,
+                            ImGui::GetFontSize() * 8.0f);
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 10.0f);
     ImGui::TableHeadersRow();
 
@@ -2417,6 +2561,20 @@ void ConfigureDialog::DrawControllerHotkeysTab() {
                                         : (binding.empty() ? "[not set]" : binding_text.c_str()));
 
         ImGui::TableSetColumnIndex(2);
+        const bool awaiting_key =
+            key_capture == KeyCaptureTarget::Hotkey && key_capture_index == static_cast<int>(i);
+        const std::string& chord = UWP::values.keyboard_hotkeys[i];
+        const std::string key_caption = fmt::format(
+            "{}###key", awaiting_key ? "[press keys]" : (chord.empty() ? "[no key]" : chord));
+        if (ImGui::SmallButton(key_caption.c_str())) {
+            if (awaiting_key) {
+                StopPolling();
+            } else {
+                StartKeyCapture(KeyCaptureTarget::Hotkey, static_cast<int>(i));
+            }
+        }
+
+        ImGui::TableSetColumnIndex(3);
         if (ImGui::SmallButton("Rebind")) {
             polling_hotkey = static_cast<int>(i);
             polling_button = -1;

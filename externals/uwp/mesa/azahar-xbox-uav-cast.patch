@@ -1,0 +1,39 @@
+diff --git a/src/gallium/drivers/d3d12/d3d12_resource.cpp b/src/gallium/drivers/d3d12/d3d12_resource.cpp
+index 2537964..be6e1e0 100644
+--- a/src/gallium/drivers/d3d12/d3d12_resource.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_resource.cpp
+@@ -295,9 +295,31 @@ init_texture(struct d3d12_screen *screen,
+           * seem to be set properly. So, all UAV-capable resources need the UAV flag.
+           */
+          D3D12_FEATURE_DATA_FORMAT_SUPPORT support = { desc.Format };
+-         if (SUCCEEDED(screen->dev->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
+-             (support.Support2 & (D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) ==
+-             (D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
++         const bool support_queried =
++            SUCCEEDED(screen->dev->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support)));
++         bool allow_uav = support_queried &&
++            (support.Support2 & (D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) ==
++            (D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE);
++#ifdef _XBOX_UWP
++         /* Xbox reports no typed UAV load for some 32bpp formats. Images on them are accessed
++          * through R32 views (see is_valid_uav_cast), so typed stores are enough.
++          */
++         if (!allow_uav && support_queried &&
++             (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
++            switch (d3d12_get_typeless_format(templ->format)) {
++            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
++            case DXGI_FORMAT_B8G8R8A8_TYPELESS:
++            case DXGI_FORMAT_B8G8R8X8_TYPELESS:
++            case DXGI_FORMAT_R16G16_TYPELESS:
++            case DXGI_FORMAT_R10G10B10A2_TYPELESS:
++               allow_uav = true;
++               break;
++            default:
++               break;
++            }
++         }
++#endif
++         if (allow_uav) {
+             desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+             desc.Format = d3d12_get_typeless_format(templ->format);
+          }

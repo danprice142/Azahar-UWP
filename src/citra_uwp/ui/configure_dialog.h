@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "citra_uwp/keyboard_input.h"
 #include "citra_uwp/live_camera.h"
 #include "common/common_types.h"
 #include "input_common/main.h"
@@ -102,6 +103,9 @@ private:
     [[nodiscard]] bool IsBindingCaptureActive() const;
     void DrawBindingCapturePopup();
     void UpdatePolling();
+    enum class KeyCaptureTarget { None, Button, Analog, Hotkey };
+    void StartKeyCapture(KeyCaptureTarget target, int index);
+    void UpdateKeyCapture();
     /// Applies SDL's standard controller map for the selected controller.
     bool MapController(const Common::ParamPackage& controller);
     /// Rewrites SDL bindings to honour the selected all/GUID/GUID+port mapping scope.
@@ -117,6 +121,11 @@ private:
     int polling_menu_chord = -1;
     bool polling_auto_map = false;
     bool binding_capture_popup_pending = false;
+    KeyCaptureTarget key_capture = KeyCaptureTarget::None;
+    int key_capture_index = -1;
+    /// Analog directions are captured in order: up, down, left, right, modifier.
+    std::size_t key_capture_step = 0;
+    KeyboardInput::AnalogKeys key_capture_analog;
 
     struct DsuAsyncState {
         // 0 idle, 1 pending, 2 success, 3 failure.

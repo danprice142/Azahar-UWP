@@ -16,6 +16,7 @@
 #include "core/frontend/emu_window.h"
 
 struct SDL_Window;
+union SDL_Event;
 struct _SDL_GameController;
 using SDL_GameController = _SDL_GameController;
 
@@ -76,6 +77,8 @@ public:
     void PollEvents(ImGuiManager* imgui);
     void UpdateVirtualTouchCursor(bool gameplay_input_enabled);
     Frontend::EmuWindow::CursorInfo GetCursorInfo() const override;
+    /// Mouse position in window coordinates while it was recently used during gameplay.
+    bool GetMouseCursor(float& x, float& y) const;
     std::unique_ptr<Frontend::GraphicsContext> CreateSharedContext() const override;
     void SaveContext() override;
     void RestoreContext() override;
@@ -115,6 +118,8 @@ private:
     bool RefreshHostSurfaceSize(bool request_layout);
     SDL_GameController* FindCursorGamepad();
     void ReleaseVirtualTouch();
+    void OnMouseEvent(const SDL_Event& event);
+    void ReleaseLocalInput();
 
     Core::System& system;
     SDL_Window* sdl_window = nullptr;
@@ -144,6 +149,12 @@ private:
     u64 remote_mouse_sequence = 0;
     std::chrono::steady_clock::time_point virtual_cursor_last_update{};
     std::chrono::steady_clock::time_point virtual_cursor_last_moved{};
+
+    bool local_input_enabled = false;
+    bool mouse_touch_pressed = false;
+    float mouse_x = 0.0f;
+    float mouse_y = 0.0f;
+    std::chrono::steady_clock::time_point mouse_last_used{};
 };
 
 } // namespace UWP

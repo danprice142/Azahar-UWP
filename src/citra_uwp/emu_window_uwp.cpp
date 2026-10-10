@@ -22,6 +22,7 @@
 #include <winrt/Windows.UI.Core.h>
 
 #include "citra_uwp/emu_window_uwp.h"
+#include "citra_uwp/keyboard_input.h"
 #include "citra_uwp/ui/imgui_manager.h"
 #include "citra_uwp/uwp_config.h"
 #include "citra_uwp/uwp_settings.h"
@@ -29,6 +30,8 @@
 #include "common/settings.h"
 #include "core/3ds.h"
 #include "core/core.h"
+#include "input_common/keyboard.h"
+#include "input_common/main.h"
 #include "input_common/udp/udp.h"
 
 namespace UWP {
@@ -411,8 +414,18 @@ void EmuWindow_UWP::PollEvents() {
 }
 
 void EmuWindow_UWP::PollEvents(ImGuiManager* imgui) {
+    KeyboardInput::BeginKeyPresses();
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        // Hotkeys see every key press, whichever layer handles the key.
+        if ((event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) &&
+            event.key.keysym.sym == SDLK_UNKNOWN) {
+            continue;
+        }
+        if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+            KeyboardInput::AddKeyPress(
+                {event.key.keysym.sym, KeyboardInput::ModifiersFromSdl(event.key.keysym.mod)});
+        }
         if (imgui != nullptr && imgui->ProcessEvent(event)) {
             // Consumed by the UI (e.g. typing into a text field); don't also act on it here.
             continue;
@@ -429,6 +442,21 @@ void EmuWindow_UWP::PollEvents(ImGuiManager* imgui) {
                 event.window.event == SDL_WINDOWEVENT_RESIZED) {
                 layout_update_requested.store(true, std::memory_order_release);
             }
+            break;
+
+        case SDL_KEYDOWN:
+            if (local_input_enabled && event.key.repeat == 0) {
+                InputCommon::GetKeyboard()->PressKey(event.key.keysym.sym);
+            }
+            break;
+        case SDL_KEYUP:
+            InputCommon::GetKeyboard()->ReleaseKey(event.key.keysym.sym);
+            break;
+
+        case SDL_MOUSEMOTION:
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP:
+            OnMouseEvent(event);
             break;
 
         case SDL_DROPFILE:
@@ -485,7 +513,72 @@ void EmuWindow_UWP::ReleaseVirtualTouch() {
     }
 }
 
+void EmuWindow_UWP::OnMouseEvent(const SDL_Event& event) {
+    if (!local_input_enabled) {
+        return;
+    }
+    const bool motion = event.type == SDL_MOUSEMOTION;
+    if (motion && event.motion.xrel == 0 && event.motion.yrel == 0) {
+        return;
+    }
+    const int x = motion ? event.motion.x : event.button.x;
+    const int y = motion ? event.motion.y : event.button.y;
+    mouse_x = static_cast<float>(x);
+    mouse_y = static_cast<float>(y);
+    mouse_last_used = std::chrono::steady_clock::now();
+
+    // SDL reports the logical CoreWindow size; the layout is in swap chain pixels.
+    int window_width = 0;
+    int window_height = 0;
+    SDL_GetWindowSize(sdl_window, &window_width, &window_height);
+    const auto& layout = GetFramebufferLayout();
+    if (window_width <= 0 || window_height <= 0) {
+        return;
+    }
+    const unsigned framebuffer_x =
+        static_cast<unsigned>(std::max(0, x) * static_cast<s64>(layout.width) / window_width);
+    const unsigned framebuffer_y =
+        static_cast<unsigned>(std::max(0, y) * static_cast<s64>(layout.height) / window_height);
+
+    // The left button touches the bottom screen, as in the desktop frontend.
+    if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+        mouse_touch_pressed = TouchPressed(framebuffer_x, framebuffer_y);
+    } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
+        if (mouse_touch_pressed) {
+            TouchReleased();
+            mouse_touch_pressed = false;
+        }
+    } else if (motion && mouse_touch_pressed) {
+        TouchMoved(framebuffer_x, framebuffer_y);
+    }
+}
+
+void EmuWindow_UWP::ReleaseLocalInput() {
+    InputCommon::GetKeyboard()->ReleaseAllKeys();
+    if (mouse_touch_pressed) {
+        TouchReleased();
+        mouse_touch_pressed = false;
+    }
+    mouse_last_used = {};
+}
+
+bool EmuWindow_UWP::GetMouseCursor(float& x, float& y) const {
+    if (!local_input_enabled || mouse_last_used == std::chrono::steady_clock::time_point{}) {
+        return false;
+    }
+    x = mouse_x;
+    y = mouse_y;
+    return mouse_touch_pressed ||
+           std::chrono::steady_clock::now() - mouse_last_used < std::chrono::seconds{3};
+}
+
 void EmuWindow_UWP::UpdateVirtualTouchCursor(bool gameplay_input_enabled) {
+    // Keys and touches started during gameplay are released before the UI takes over.
+    if (local_input_enabled && !gameplay_input_enabled) {
+        ReleaseLocalInput();
+    }
+    local_input_enabled = gameplay_input_enabled;
+
     using Clock = std::chrono::steady_clock;
     const auto now = Clock::now();
     const auto mode = UWP::values.right_stick_function.GetValue();

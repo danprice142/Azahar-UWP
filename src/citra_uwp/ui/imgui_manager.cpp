@@ -14,6 +14,7 @@
 #include <imgui_impl_sdl2.h>
 #include <imgui_internal.h>
 
+#include "citra_uwp/keyboard_input.h"
 #include "citra_uwp/ui/imgui_manager.h"
 #include "citra_uwp/ui/widgets.h"
 #include "citra_uwp/uwp_settings.h"
@@ -46,27 +47,6 @@ void SetPlatformImeData(ImGuiContext*, ImGuiViewport* viewport, ImGuiPlatformIme
 
     // Called on every change so the WinRT InputPane updates its caret rectangle.
     SDL_StartTextInput();
-}
-
-/// Editing keys the on-screen keyboard delivers as key events rather than SDL_TEXTINPUT.
-bool IsOskEditingKey(SDL_Keycode key) {
-    switch (key) {
-    case SDLK_BACKSPACE:
-    case SDLK_DELETE:
-    case SDLK_LEFT:
-    case SDLK_RIGHT:
-    case SDLK_UP:
-    case SDLK_DOWN:
-    case SDLK_HOME:
-    case SDLK_END:
-    case SDLK_PAGEUP:
-    case SDLK_PAGEDOWN:
-    case SDLK_RETURN:
-    case SDLK_KP_ENTER:
-        return true;
-    default:
-        return false;
-    }
 }
 
 } // namespace
@@ -128,6 +108,8 @@ bool ImGuiManager::Initialize(SDL_Window* window) {
         ImGui::DestroyContext();
         return false;
     }
+    // UpdateNavInputs submits the gamepad keys, merged with their keyboard equivalents.
+    ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_Manual, nullptr, 0);
     if (!ImGui_ImplOpenGL3_Init(kGlslVersion)) {
         LOG_CRITICAL(Frontend, "ImGui_ImplOpenGL3_Init failed");
         ImGui_ImplSDL2_Shutdown();
@@ -232,7 +214,7 @@ bool ImGuiManager::IsLeftStickPressed() {
            SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_LEFTSTICK) != 0;
 }
 
-void ImGuiManager::ApplyLeftStickAsDpad() {
+void ImGuiManager::UpdateNavInputs() {
     // ImGui reserves item navigation for the D-pad; fold the left stick into it. The union is
     // re-sent every frame so a recentred stick releases the key without cancelling a D-pad press.
     if (gamepad != nullptr && SDL_GameControllerGetAttached(gamepad) == SDL_FALSE) {
@@ -245,21 +227,23 @@ void ImGuiManager::ApplyLeftStickAsDpad() {
     }
     if (gamepad == nullptr) {
         RefreshGamepad();
-        if (gamepad == nullptr) {
-            return;
-        }
     }
+
+    const auto axis = [this](SDL_GameControllerAxis a) -> Sint16 {
+        return gamepad != nullptr ? SDL_GameControllerGetAxis(gamepad, a) : 0;
+    };
+    const auto button = [this](SDL_GameControllerButton b) {
+        return gamepad != nullptr && SDL_GameControllerGetButton(gamepad, b) != 0;
+    };
 
     // Well past half deflection, so resting drift does not move the selection.
     constexpr Sint16 dead_zone = 18000;
-    const Sint16 x = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX);
-    const Sint16 y = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTY);
-
-    const auto button = [this](SDL_GameControllerButton b) {
-        return SDL_GameControllerGetButton(gamepad, b) != 0;
-    };
+    const Sint16 x = axis(SDL_CONTROLLER_AXIS_LEFTX);
+    const Sint16 y = axis(SDL_CONTROLLER_AXIS_LEFTY);
 
     ImGuiIO& io = ImGui::GetIO();
+    // The keyboard stands in for a pad when none is attached.
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 
     // Pulse the stick so ImGui's key repeat does not drive the selection too fast.
     const float dt = io.DeltaTime > 0.0f ? io.DeltaTime : 1.0f / 60.0f;
@@ -290,12 +274,95 @@ void ImGuiManager::ApplyLeftStickAsDpad() {
     const bool step_up = pulse(stick_up, y < -dead_zone);
     const bool step_down = pulse(stick_down, y > dead_zone);
 
+    // Keys already held when the keyboard takes over the UI are ignored until released, so the
+    // key that opened a menu or confirmed a field does not act on it again.
+    const bool keyboard_enabled =
+        !gameplay_input_active && !io.WantTextInput && !KeyboardInput::IsKeyCaptureActive();
+    if (keyboard_enabled && !keyboard_nav_enabled) {
+        keyboard_nav_latched = true;
+    }
+    keyboard_nav_enabled = keyboard_enabled;
+
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    const auto key = [keys](SDL_Scancode scancode) { return keys[scancode] != 0; };
+    const bool key_up = key(SDL_SCANCODE_UP);
+    const bool key_down = key(SDL_SCANCODE_DOWN);
+    const bool key_left = key(SDL_SCANCODE_LEFT);
+    const bool key_right = key(SDL_SCANCODE_RIGHT);
+    const bool key_accept =
+        key(SDL_SCANCODE_RETURN) || key(SDL_SCANCODE_KP_ENTER) || key(SDL_SCANCODE_SPACE);
+    const bool key_back = key(SDL_SCANCODE_ESCAPE) || key(SDL_SCANCODE_BACKSPACE);
+    const bool key_details = key(SDL_SCANCODE_APPLICATION);
+    const bool key_menu = key(SDL_SCANCODE_LALT) || key(SDL_SCANCODE_RALT);
+    const bool key_previous = key(SDL_SCANCODE_PAGEUP);
+    const bool key_next = key(SDL_SCANCODE_PAGEDOWN);
+    const bool any_key = key_up || key_down || key_left || key_right || key_accept || key_back ||
+                         key_details || key_menu || key_previous || key_next;
+    if (keyboard_nav_latched && !any_key) {
+        keyboard_nav_latched = false;
+    }
+    const bool keyboard = keyboard_nav_enabled && !keyboard_nav_latched;
+
+    // Arrows from the remote DSU keyboard navigate like local ones.
+    const auto remote_arrow = [this, &io](int code) {
+        return !io.WantTextInput && (remote_keyboard_bitmap[code / 32] & (1U << (code % 32))) != 0;
+    };
+
+    // The mouse wheel scrolls the panes that follow the right stick.
+    float wheel_up = 0.0f;
+    float wheel_down = 0.0f;
+    if (wheel_scroll < 0.0f) {
+        wheel_up = 1.0f;
+        wheel_scroll = std::min(0.0f, wheel_scroll + dt);
+    } else if (wheel_scroll > 0.0f) {
+        wheel_down = 1.0f;
+        wheel_scroll = std::max(0.0f, wheel_scroll - dt);
+    }
+
+    bool nav_down = false;
+    const auto send = [&](ImGuiKey imgui_key, bool pad, bool keyboard_key) {
+        const bool down = pad || (keyboard && keyboard_key);
+        nav_down = nav_down || down;
+        io.AddKeyEvent(imgui_key, down);
+    };
+    const auto send_analog = [&](ImGuiKey imgui_key, SDL_GameControllerAxis a, float v0, float v1,
+                                 float extra) {
+        const float pad = std::clamp((static_cast<float>(axis(a)) - v0) / (v1 - v0), 0.0f, 1.0f);
+        const float value = std::max(pad, extra);
+        io.AddKeyAnalogEvent(imgui_key, value > 0.1f, value);
+    };
+
+    send(ImGuiKey_GamepadStart, button(SDL_CONTROLLER_BUTTON_START), key_menu);
+    send(ImGuiKey_GamepadBack, button(SDL_CONTROLLER_BUTTON_BACK), false);
+    send(ImGuiKey_GamepadFaceLeft, button(SDL_CONTROLLER_BUTTON_X), key_details);
+    send(ImGuiKey_GamepadFaceRight, button(SDL_CONTROLLER_BUTTON_B), key_back);
+    send(ImGuiKey_GamepadFaceUp, button(SDL_CONTROLLER_BUTTON_Y), false);
+    send(ImGuiKey_GamepadFaceDown, button(SDL_CONTROLLER_BUTTON_A), key_accept);
     // The physical D-pad is passed through held, so it keeps ImGui's native repeat behaviour.
-    io.AddKeyEvent(ImGuiKey_GamepadDpadLeft, button(SDL_CONTROLLER_BUTTON_DPAD_LEFT) || step_left);
-    io.AddKeyEvent(ImGuiKey_GamepadDpadRight,
-                   button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || step_right);
-    io.AddKeyEvent(ImGuiKey_GamepadDpadUp, button(SDL_CONTROLLER_BUTTON_DPAD_UP) || step_up);
-    io.AddKeyEvent(ImGuiKey_GamepadDpadDown, button(SDL_CONTROLLER_BUTTON_DPAD_DOWN) || step_down);
+    send(ImGuiKey_GamepadDpadLeft,
+         button(SDL_CONTROLLER_BUTTON_DPAD_LEFT) || step_left || remote_arrow(276), key_left);
+    send(ImGuiKey_GamepadDpadRight,
+         button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || step_right || remote_arrow(275), key_right);
+    send(ImGuiKey_GamepadDpadUp,
+         button(SDL_CONTROLLER_BUTTON_DPAD_UP) || step_up || remote_arrow(273), key_up);
+    send(ImGuiKey_GamepadDpadDown,
+         button(SDL_CONTROLLER_BUTTON_DPAD_DOWN) || step_down || remote_arrow(274), key_down);
+    send(ImGuiKey_GamepadL1, button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER), key_previous);
+    send(ImGuiKey_GamepadR1, button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER), key_next);
+    send(ImGuiKey_GamepadL3, button(SDL_CONTROLLER_BUTTON_LEFTSTICK), false);
+    send(ImGuiKey_GamepadR3, button(SDL_CONTROLLER_BUTTON_RIGHTSTICK), false);
+
+    constexpr float thumb_dead_zone = 8000.0f;
+    send_analog(ImGuiKey_GamepadL2, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 0.0f, 32767.0f, 0.0f);
+    send_analog(ImGuiKey_GamepadR2, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 0.0f, 32767.0f, 0.0f);
+    send_analog(ImGuiKey_GamepadRStickLeft, SDL_CONTROLLER_AXIS_RIGHTX, -thumb_dead_zone, -32768.0f,
+                0.0f);
+    send_analog(ImGuiKey_GamepadRStickRight, SDL_CONTROLLER_AXIS_RIGHTX, thumb_dead_zone, 32767.0f,
+                0.0f);
+    send_analog(ImGuiKey_GamepadRStickUp, SDL_CONTROLLER_AXIS_RIGHTY, -thumb_dead_zone, -32768.0f,
+                wheel_up);
+    send_analog(ImGuiKey_GamepadRStickDown, SDL_CONTROLLER_AXIS_RIGHTY, thumb_dead_zone, 32767.0f,
+                wheel_down);
 
     // Suppress the left stick's native scrolling role; the right stick keeps it for the details
     // pane.
@@ -303,6 +370,29 @@ void ImGuiManager::ApplyLeftStickAsDpad() {
     io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, false, 0.0f);
     io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp, false, 0.0f);
     io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown, false, 0.0f);
+
+    // Controller or keyboard navigation hides the mouse cursor until the mouse is used again.
+    if (nav_down && !nav_input_down) {
+        local_mouse_active = false;
+    }
+    nav_input_down = nav_down;
+}
+
+void ImGuiManager::SetGameplayInputActive(bool active) {
+    if (initialized && active && !gameplay_input_active) {
+        // Key releases during gameplay never reach ImGui.
+        ImGui::GetIO().ClearInputKeys();
+    }
+    gameplay_input_active = active;
+}
+
+void ImGuiManager::DrawMouseCursor(float x, float y) {
+    if (!initialized) {
+        return;
+    }
+    ImGui::RenderMouseCursor(ImVec2(x, y), ImGui::GetStyle().MouseCursorScale,
+                             ImGuiMouseCursor_Arrow, IM_COL32_WHITE, IM_COL32_BLACK,
+                             IM_COL32(0, 0, 0, 48));
 }
 
 void ImGuiManager::FocusMainMenuBar() {
@@ -347,25 +437,44 @@ bool ImGuiManager::ProcessEvent(const SDL_Event& event) {
         SDL_StartTextInput();
     }
 
-    // The local hardware path is the WGI gamepad; keyboard/mouse must not become a control
-    // scheme.
-    switch (event.type) {
-    case SDL_KEYDOWN:
-    case SDL_KEYUP: {
-        if (!SDL_IsTextInputActive() || !IsOskEditingKey(event.key.keysym.sym)) {
-            return true;
-        }
-
-        // Drop hardware modifiers so a blocked key-up cannot leave ImGui's modifier state stuck.
-        SDL_Event edit_event = event;
-        edit_event.key.keysym.mod = KMOD_NONE;
-        ImGui_ImplSDL2_ProcessEvent(&edit_event);
+    // Touch is not an input path; SDL also reports it as mouse events.
+    const bool touch_mouse =
+        (event.type == SDL_MOUSEMOTION && event.motion.which == SDL_TOUCH_MOUSEID) ||
+        ((event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) &&
+         event.button.which == SDL_TOUCH_MOUSEID) ||
+        (event.type == SDL_MOUSEWHEEL && event.wheel.which == SDL_TOUCH_MOUSEID);
+    if (touch_mouse) {
         return true;
     }
+
+    // During gameplay the keyboard and mouse belong to the emulated console.
+    switch (event.type) {
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        if (gameplay_input_active) {
+            return false;
+        }
+        ImGui_ImplSDL2_ProcessEvent(&event);
+        return true;
     case SDL_MOUSEMOTION:
     case SDL_MOUSEBUTTONDOWN:
     case SDL_MOUSEBUTTONUP:
     case SDL_MOUSEWHEEL:
+        if (gameplay_input_active) {
+            return false;
+        }
+        // SDL's WinRT driver cannot warp, so it reports ImGui's cursor parking as motion
+        // without movement.
+        if (event.type == SDL_MOUSEMOTION && event.motion.xrel == 0 && event.motion.yrel == 0) {
+            return true;
+        }
+        local_mouse_active = true;
+        if (event.type == SDL_MOUSEWHEEL) {
+            // Each notch also scrolls the right-stick panes briefly.
+            wheel_scroll -= event.wheel.preciseY * 0.12f;
+        }
+        ImGui_ImplSDL2_ProcessEvent(&event);
+        return true;
     case SDL_FINGERDOWN:
     case SDL_FINGERUP:
     case SDL_FINGERMOTION:
@@ -414,9 +523,9 @@ void ImGuiManager::BeginFrame(unsigned framebuffer_width, unsigned framebuffer_h
         remote_mouse_sequence = remote_mouse.sequence;
         remote_mouse_active = true;
     }
-    if (remote_mouse_for_frontend && remote_mouse_active && remote_mouse.active) {
-        io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
-        io.MouseDrawCursor = true;
+    const bool remote_mouse_visible =
+        remote_mouse_for_frontend && remote_mouse_active && remote_mouse.active;
+    if (remote_mouse_visible) {
         const float normalized_x = (static_cast<float>(remote_mouse.x) + 32768.0f) / 65535.0f;
         const float normalized_y = (static_cast<float>(remote_mouse.y) + 32768.0f) / 65535.0f;
         io.AddMousePosEvent(std::clamp(normalized_x, 0.0f, 1.0f) * io.DisplaySize.x,
@@ -424,13 +533,8 @@ void ImGuiManager::BeginFrame(unsigned framebuffer_width, unsigned framebuffer_h
         for (int button = 0; button < 3; ++button) {
             io.AddMouseButtonEvent(button, (remote_mouse.buttons & (1U << button)) != 0);
         }
-    } else if (remote_mouse_active) {
+    } else {
         remote_mouse_active = false;
-        io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
-        io.MouseDrawCursor = false;
-        for (int button = 0; button < 3; ++button) {
-            io.AddMouseButtonEvent(button, false);
-        }
     }
 
     const auto remote_keyboard = InputCommon::CemuhookUDP::GetRemoteKeyboardState();
@@ -450,13 +554,13 @@ void ImGuiManager::BeginFrame(unsigned framebuffer_width, unsigned framebuffer_h
         case 127:
             return ImGuiKey_Delete;
         case 273:
-            return io.WantTextInput ? ImGuiKey_UpArrow : ImGuiKey_GamepadDpadUp;
+            return io.WantTextInput ? ImGuiKey_UpArrow : ImGuiKey_None;
         case 274:
-            return io.WantTextInput ? ImGuiKey_DownArrow : ImGuiKey_GamepadDpadDown;
+            return io.WantTextInput ? ImGuiKey_DownArrow : ImGuiKey_None;
         case 275:
-            return io.WantTextInput ? ImGuiKey_RightArrow : ImGuiKey_GamepadDpadRight;
+            return io.WantTextInput ? ImGuiKey_RightArrow : ImGuiKey_None;
         case 276:
-            return io.WantTextInput ? ImGuiKey_LeftArrow : ImGuiKey_GamepadDpadLeft;
+            return io.WantTextInput ? ImGuiKey_LeftArrow : ImGuiKey_None;
         case 278:
             return ImGuiKey_Home;
         case 279:
@@ -498,7 +602,26 @@ void ImGuiManager::BeginFrame(unsigned framebuffer_width, unsigned framebuffer_h
     remote_keyboard_bitmap = current_keyboard;
     remote_keyboard_sequence = remote_keyboard.sequence;
     // Must run between the backend's frame and NewFrame(), which consumes the queued key events.
-    ApplyLeftStickAsDpad();
+    UpdateNavInputs();
+    if (gameplay_input_active) {
+        local_mouse_active = false;
+        wheel_scroll = 0.0f;
+    }
+    const bool show_mouse = remote_mouse_visible || local_mouse_active;
+    if (show_mouse != mouse_visible) {
+        mouse_visible = show_mouse;
+        if (show_mouse) {
+            io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+        } else {
+            io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
+            for (int button = 0; button < 3; ++button) {
+                io.AddMouseButtonEvent(button, false);
+            }
+        }
+        io.MouseDrawCursor = show_mouse;
+        // Navigation would otherwise drag a visible cursor along with the focused item.
+        io.ConfigNavMoveSetMousePos = !show_mouse;
+    }
     Widgets::LatchPopupInputOwner();
     ImGui::NewFrame();
     HandleConsoleNavigation();

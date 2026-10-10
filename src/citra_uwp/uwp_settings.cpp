@@ -29,6 +29,36 @@ Values::Values() {
         InputCommon::CemuhookUDP::GenerateAddonButtonParam(
             local_button(SDL_CONTROLLER_BUTTON_START), InputCommon::CemuhookUDP::Button::Options)
             .Serialize();
+
+    // Desktop frontend defaults.
+    const auto key = [this](ControllerHotkey hotkey, const char* chord) {
+        keyboard_hotkeys[static_cast<std::size_t>(hotkey)] = chord;
+    };
+    key(ControllerHotkey::TogglePause, "F4");
+    key(ControllerHotkey::StopEmulation, "F5");
+    key(ControllerHotkey::RestartEmulation, "F6");
+    key(ControllerHotkey::CaptureScreenshot, "Ctrl+P");
+    key(ControllerHotkey::SwapScreens, "F9");
+    key(ControllerHotkey::ToggleUprightScreens, "F8");
+    key(ControllerHotkey::CycleLayout, "F10");
+    key(ControllerHotkey::ToggleMute, "Ctrl+M");
+    key(ControllerHotkey::IncreaseSpeed, "+");
+    key(ControllerHotkey::DecreaseSpeed, "-");
+    key(ControllerHotkey::Increase3D, "Ctrl++");
+    key(ControllerHotkey::Decrease3D, "Ctrl+-");
+    key(ControllerHotkey::LoadFile, "Ctrl+O");
+    key(ControllerHotkey::Exit, "Ctrl+Q");
+    key(ControllerHotkey::LoadAmiibo, "F2");
+    key(ControllerHotkey::RemoveAmiibo, "F3");
+    key(ControllerHotkey::SaveToOldestSlot, "Ctrl+C");
+    key(ControllerHotkey::LoadFromNewestSlot, "Ctrl+V");
+    key(ControllerHotkey::ToggleFilterBar, "Ctrl+F");
+    key(ControllerHotkey::ToggleStatusBar, "Ctrl+S");
+    key(ControllerHotkey::ToggleCustomTextures, "F7");
+    key(ControllerHotkey::BrowsePublicRooms, "Ctrl+B");
+    key(ControllerHotkey::CreateRoom, "Ctrl+N");
+    key(ControllerHotkey::LeaveRoom, "Ctrl+L");
+    key(ControllerHotkey::ShowCurrentRoom, "Ctrl+R");
 }
 
 Values values;

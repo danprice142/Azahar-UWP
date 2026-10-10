@@ -74,6 +74,19 @@ enum class ControllerHotkey : std::size_t {
     ResetSpeed,
     Increase3D,
     Decrease3D,
+    LoadFile,
+    Exit,
+    LoadAmiibo,
+    RemoveAmiibo,
+    SaveToOldestSlot,
+    LoadFromNewestSlot,
+    ToggleFilterBar,
+    ToggleStatusBar,
+    ToggleCustomTextures,
+    BrowsePublicRooms,
+    CreateRoom,
+    LeaveRoom,
+    ShowCurrentRoom,
     Count,
 };
 
@@ -111,6 +124,32 @@ constexpr const char* ControllerHotkeyName(ControllerHotkey hotkey) {
         return "Increase 3D Depth";
     case ControllerHotkey::Decrease3D:
         return "Decrease 3D Depth";
+    case ControllerHotkey::LoadFile:
+        return "Load File";
+    case ControllerHotkey::Exit:
+        return "Exit Azahar";
+    case ControllerHotkey::LoadAmiibo:
+        return "Load Amiibo";
+    case ControllerHotkey::RemoveAmiibo:
+        return "Remove Amiibo";
+    case ControllerHotkey::SaveToOldestSlot:
+        return "Save to Oldest Non-Quicksave Slot";
+    case ControllerHotkey::LoadFromNewestSlot:
+        return "Load from Newest Non-Quicksave Slot";
+    case ControllerHotkey::ToggleFilterBar:
+        return "Toggle Filter Bar";
+    case ControllerHotkey::ToggleStatusBar:
+        return "Toggle Status Bar";
+    case ControllerHotkey::ToggleCustomTextures:
+        return "Toggle Custom Textures";
+    case ControllerHotkey::BrowsePublicRooms:
+        return "Multiplayer Browse Public Rooms";
+    case ControllerHotkey::CreateRoom:
+        return "Multiplayer Create Room";
+    case ControllerHotkey::LeaveRoom:
+        return "Multiplayer Leave Room";
+    case ControllerHotkey::ShowCurrentRoom:
+        return "Multiplayer Show Current Room";
     default:
         return "";
     }
@@ -209,6 +248,10 @@ struct Values {
     std::array<std::string, static_cast<std::size_t>(ControllerHotkey::Count)> controller_hotkeys{};
     /// Two button bindings that must both be held to open the gameplay menu (default View + Menu).
     std::array<std::string, 2> in_game_menu_chord{};
+    /// Key chord per ControllerHotkey slot, in the desktop frontend's text form; empty is unbound.
+    std::array<std::string, static_cast<std::size_t>(ControllerHotkey::Count)> keyboard_hotkeys{};
+    /// Set once the desktop frontend's default keys have been added to the input profiles.
+    Settings::Setting<bool> keyboard_defaults_applied{false, "keyboardDefaultsApplied"};
 };
 
 extern Values values;
