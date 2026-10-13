@@ -1273,14 +1273,6 @@ int main(int argc, char** argv) {
                 report_error(6);
                 continue;
             }
-            if (command.start) {
-                // FFmpeg is loaded lazily by the dumping dialog, which remote commands bypass.
-                if (!DynamicLibrary::FFmpeg::LoadFFmpeg()) {
-                    report_error(5);
-                    continue;
-                }
-            }
-
             const bool resume_after_command = emulation_thread.IsRunning();
             emulation_thread.Pause();
             emulation_thread.Synchronize();

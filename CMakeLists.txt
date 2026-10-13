@@ -153,7 +153,7 @@ option(ENABLE_OPENAL "Enables the OpenAL audio backend" ON)
 
 CMAKE_DEPENDENT_OPTION(ENABLE_LIBUSB "Enable libusb for GameCube Adapter support" ON "NOT IOS" OFF)
 
-CMAKE_DEPENDENT_OPTION(ENABLE_FFMPEG "Enable features which require FFmpeg to function" ON "ENABLE_QT" OFF)
+CMAKE_DEPENDENT_OPTION(ENABLE_FFMPEG "Enable features which require FFmpeg to function" ON "ENABLE_QT OR WINDOWS_STORE" OFF)
 
 CMAKE_DEPENDENT_OPTION(ENABLE_SOFTWARE_RENDERER "Enables the software renderer" ON "NOT ANDROID" OFF)
 CMAKE_DEPENDENT_OPTION(ENABLE_OPENGL "Enables the OpenGL renderer" ${DEFAULT_ENABLE_OPENGL} "NOT APPLE" OFF)
@@ -404,6 +404,18 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 if (ENABLE_FFMPEG)
+    if (WINDOWS_STORE)
+        # Desktop FFmpeg builds cannot load in an app container; use the bundled AppContainer build.
+        set(FFMPEG_UWP_ROOT "${PROJECT_SOURCE_DIR}/externals/uwp/ffmpeg/7.1")
+        foreach(_ffmpeg_lib AVCODEC:avcodec AVFILTER:avfilter AVFORMAT:avformat AVUTIL:avutil
+                            SWRESAMPLE:swresample SWSCALE:swscale)
+            string(REPLACE ":" ";" _ffmpeg_lib "${_ffmpeg_lib}")
+            list(GET _ffmpeg_lib 0 _ffmpeg_component)
+            list(GET _ffmpeg_lib 1 _ffmpeg_name)
+            set(${_ffmpeg_component}_INCLUDE_DIRS "${FFMPEG_UWP_ROOT}/include" CACHE PATH "" FORCE)
+            set(${_ffmpeg_component}_LIBRARIES "${FFMPEG_UWP_ROOT}/lib/${_ffmpeg_name}.lib" CACHE FILEPATH "" FORCE)
+        endforeach()
+    endif()
     include(FindFFmpeg)
     # Currently, specifically FFmpeg 7.x is required. No older, no newer.
     find_package(FFmpeg 59 REQUIRED COMPONENTS AVUTIL) # 58 is FFmpeg 6.x, 60 is FFmpeg 8.x

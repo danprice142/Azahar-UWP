@@ -1,11 +1,11 @@
 # Copyright Azahar Emulator Project
 # Licensed under GPLv2 or any later version
 #
-# Rebuilds the checked-in x64 AppContainer FFmpeg 6 runtime used for UWP video dumping.
+# Rebuilds the checked-in x64 AppContainer FFmpeg 7.1 runtime used for UWP video dumping.
 
 [CmdletBinding()]
 param(
-    [string] $SourceDir = (Join-Path $env:TEMP 'azahar-ffmpeg-n6.0'),
+    [string] $SourceDir = (Join-Path $env:TEMP 'azahar-ffmpeg-n7.1.2'),
     [string] $Msys2Root = 'C:\msys64',
     [string] $VsInstallPath = '',
     [ValidateRange(1, 256)]
@@ -13,20 +13,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ffmpegCommit = 'ea3d24bbe3c58b171e55fe2151fc7ffaca3ab3d2'
+$ffmpegCommit = 'f893221c8d89cb798b829bebe71d55e1a3f242fd'
 $requiredDlls = @(
-    'avcodec-60.dll',
-    'avfilter-9.dll',
-    'avformat-60.dll',
-    'avutil-58.dll',
-    'swresample-4.dll',
-    'swscale-7.dll'
+    'avcodec-61.dll',
+    'avfilter-10.dll',
+    'avformat-61.dll',
+    'avutil-59.dll',
+    'swresample-5.dll',
+    'swscale-8.dll'
 )
+$importLibraries = @('avcodec', 'avfilter', 'avformat', 'avutil', 'swresample', 'swscale')
 
 $distUwp = $PSScriptRoot
 $repoRoot = Split-Path (Split-Path $distUwp -Parent) -Parent
-$destinationRoot = Join-Path $repoRoot 'externals\uwp\ffmpeg\6.0'
+$destinationRoot = Join-Path $repoRoot 'externals\uwp\ffmpeg\7.1'
 $destinationBin = Join-Path $destinationRoot 'bin'
+$destinationInclude = Join-Path $destinationRoot 'include'
+$destinationLib = Join-Path $destinationRoot 'lib'
 $bash = Join-Path $Msys2Root 'usr\bin\bash.exe'
 if (-not (Test-Path -LiteralPath $bash)) {
     throw "MSYS2 bash was not found at $bash."
@@ -61,7 +64,7 @@ $env:PATH = "$(Split-Path $nasm.Source -Parent);$env:PATH"
 $sourceFull = [IO.Path]::GetFullPath($SourceDir)
 if (-not (Test-Path -LiteralPath $sourceFull)) {
     New-Item -ItemType Directory -Force -Path (Split-Path $sourceFull -Parent) | Out-Null
-    & git clone --no-checkout https://git.ffmpeg.org/ffmpeg.git $sourceFull
+    & git clone --no-checkout -c core.autocrlf=false https://git.ffmpeg.org/ffmpeg.git $sourceFull
     if ($LASTEXITCODE -ne 0) { throw "git clone failed ($LASTEXITCODE)" }
     & git -C $sourceFull checkout --detach $ffmpegCommit
     if ($LASTEXITCODE -ne 0) { throw "git checkout failed ($LASTEXITCODE)" }
@@ -152,6 +155,8 @@ cd "$build_dir"
   --enable-filter=buffer,buffersink,fps,format,scale \
   --disable-dxva2 \
   --disable-d3d11va \
+  --disable-d3d12va \
+  --disable-vulkan \
   --disable-gpl \
   --disable-version3 \
   --extra-cflags="-MD -DWINAPI_FAMILY=WINAPI_FAMILY_APP -D_WIN32_WINNT=0x0A00 -wd4267 -wd4133 -wd4334 -wd4101" \
@@ -229,6 +234,23 @@ foreach ($dll in $requiredDlls) {
     }
     Copy-Item -LiteralPath $built -Destination (Join-Path $destinationBin $dll) -Force
 }
+
+# Azahar links the import libraries directly, so the headers must match the DLLs.
+New-Item -ItemType Directory -Force -Path $destinationLib | Out-Null
+foreach ($library in $importLibraries) {
+    $built = Join-Path (Join-Path $installDir 'bin') "$library.lib"
+    if (-not (Test-Path -LiteralPath $built)) {
+        $built = Join-Path (Join-Path $installDir 'lib') "$library.lib"
+    }
+    if (-not (Test-Path -LiteralPath $built)) {
+        throw "The FFmpeg build did not produce the $library.lib import library."
+    }
+    Copy-Item -LiteralPath $built -Destination (Join-Path $destinationLib "$library.lib") -Force
+}
+if (Test-Path -LiteralPath $destinationInclude) {
+    Remove-Item -LiteralPath $destinationInclude -Recurse -Force
+}
+Copy-Item -LiteralPath (Join-Path $installDir 'include') -Destination $destinationInclude -Recurse
 
 Copy-Item -LiteralPath (Join-Path $sourceFull 'COPYING.LGPLv2.1') `
     -Destination (Join-Path $destinationRoot 'LICENSE.txt') -Force

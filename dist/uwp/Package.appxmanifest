@@ -9,7 +9,7 @@
   <Identity
     Name="Azahar.Emulator.Uwp"
     Publisher="CN=DanP142"
-    Version="0.2126.1.1"
+    Version="0.2126.2.0"
     ProcessorArchitecture="x64" />
 
   <mp:PhoneIdentity PhoneProductId="9f2b6d41-3c7e-4a58-9b0d-2e6f5a1c8d34"

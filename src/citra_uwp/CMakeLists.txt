@@ -132,8 +132,8 @@ target_link_libraries(citra_uwp PRIVATE
     "${MESA_UWP_ROOT}/lib/libgallium_wgl.lib"
 )
 
-# FFmpeg is loaded at runtime by common/dynamic_library/ffmpeg.cpp; no import libraries.
-set(FFMPEG_UWP_ROOT "${PROJECT_SOURCE_DIR}/externals/uwp/ffmpeg/6.0")
+target_link_libraries(citra_uwp PRIVATE ${FFMPEG_LIBRARIES})
+target_include_directories(citra_uwp PRIVATE ${FFMPEG_INCLUDE_DIRS})
 
 # z-1.dll is mesa's zlib. dxil.dll is loaded by name by mesa's d3d12 driver to sign shaders and
 # comes from the Windows SDK's D3D redistributable; the app CRT ships in Microsoft.VCLibs.
@@ -154,12 +154,12 @@ set(CITRA_UWP_RUNTIME_DLLS
     "${MESA_UWP_ROOT}/bin/libgallium_wgl.dll"
     "${MESA_UWP_ROOT}/bin/z-1.dll"
     "${CITRA_UWP_DXIL_DLL}"
-    "${FFMPEG_UWP_ROOT}/bin/avcodec-60.dll"
-    "${FFMPEG_UWP_ROOT}/bin/avfilter-9.dll"
-    "${FFMPEG_UWP_ROOT}/bin/avformat-60.dll"
-    "${FFMPEG_UWP_ROOT}/bin/avutil-58.dll"
-    "${FFMPEG_UWP_ROOT}/bin/swresample-4.dll"
-    "${FFMPEG_UWP_ROOT}/bin/swscale-7.dll"
+    "${FFMPEG_UWP_ROOT}/bin/avcodec-61.dll"
+    "${FFMPEG_UWP_ROOT}/bin/avfilter-10.dll"
+    "${FFMPEG_UWP_ROOT}/bin/avformat-61.dll"
+    "${FFMPEG_UWP_ROOT}/bin/avutil-59.dll"
+    "${FFMPEG_UWP_ROOT}/bin/swresample-5.dll"
+    "${FFMPEG_UWP_ROOT}/bin/swscale-8.dll"
 )
 foreach(_dll IN LISTS CITRA_UWP_RUNTIME_DLLS)
     if(NOT EXISTS "${_dll}")

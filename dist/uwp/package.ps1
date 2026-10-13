@@ -85,12 +85,12 @@ foreach ($dll in @(
     'libgallium_wgl.dll',
     'z-1.dll',
     'dxil.dll',
-    'avcodec-60.dll',
-    'avfilter-9.dll',
-    'avformat-60.dll',
-    'avutil-58.dll',
-    'swresample-4.dll',
-    'swscale-7.dll'
+    'avcodec-61.dll',
+    'avfilter-10.dll',
+    'avformat-61.dll',
+    'avutil-59.dll',
+    'swresample-5.dll',
+    'swscale-8.dll'
 )) {
     $path = Join-Path $binDir $dll
     if (-not (Test-Path $path)) { throw "Required runtime DLL missing from the build: $dll" }
@@ -99,10 +99,10 @@ foreach ($dll in @(
 
 $thirdPartyNotices = Join-Path $layout 'ThirdPartyNotices'
 New-Item -ItemType Directory -Force -Path $thirdPartyNotices | Out-Null
-$ffmpegLicense = Join-Path $repoRoot 'externals\uwp\ffmpeg\6.0\LICENSE.txt'
-$ffmpegBuildInfo = Join-Path $repoRoot 'externals\uwp\ffmpeg\6.0\BUILD_INFO.txt'
+$ffmpegLicense = Join-Path $repoRoot 'externals\uwp\ffmpeg\7.1\LICENSE.txt'
+$ffmpegBuildInfo = Join-Path $repoRoot 'externals\uwp\ffmpeg\7.1\BUILD_INFO.txt'
 if (-not (Test-Path $ffmpegLicense) -or -not (Test-Path $ffmpegBuildInfo)) {
-    throw 'FFmpeg license or build provenance is missing from externals\uwp\ffmpeg\6.0.'
+    throw 'FFmpeg license or build provenance is missing from externals\uwp\ffmpeg\7.1.'
 }
 Copy-Item $ffmpegLicense (Join-Path $thirdPartyNotices 'FFmpeg-LICENSE.txt')
 Copy-Item $ffmpegBuildInfo (Join-Path $thirdPartyNotices 'FFmpeg-BUILD_INFO.txt')

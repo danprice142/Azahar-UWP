@@ -1,0 +1,85 @@
+# FFmpeg 7.1 for Azahar UWP
+
+The DLLs in `bin/` are a native x64 Microsoft AppContainer build of upstream
+FFmpeg tag `n7.1.2`, commit `f893221c8d89cb798b829bebe71d55e1a3f242fd`.
+They are not desktop/MinGW DLLs.
+
+The build uses the LGPL configuration below. It intentionally contains only
+the muxers, encoders, filters, and protocols needed by Azahar's local video
+dumper and UDP MPEG-TS streaming, keeping the Xbox package and runtime
+scanning cost small.
+
+```text
+--toolchain=msvc
+--arch=x86_64
+--target-os=win32
+--enable-cross-compile
+--enable-shared
+--disable-static
+--disable-programs
+--disable-doc
+--disable-debug
+--disable-avdevice
+--enable-network
+--disable-decoders
+--disable-demuxers
+--disable-parsers
+--disable-bsfs
+--disable-hwaccels
+--disable-protocols
+--enable-protocol=file,udp
+--disable-muxers
+--enable-muxer=mp4,matroska,avi,mpegts
+--disable-encoders
+--enable-encoder=h264_mf,mpeg4,rawvideo,ffv1,aac,flac,pcm_s16le
+--disable-filters
+--enable-filter=buffer,buffersink,fps,format,scale
+--disable-dxva2
+--disable-d3d11va
+--disable-d3d12va
+--disable-vulkan
+--disable-gpl
+--disable-version3
+--extra-cflags=-MD -DWINAPI_FAMILY=WINAPI_FAMILY_APP -D_WIN32_WINNT=0x0A00
+--extra-ldflags=-APPCONTAINER WindowsApp.lib
+```
+
+Before compilation, `dist/uwp/ffmpeg-winrt.patch` makes FFmpeg's CPU-count
+selection prefer its existing WinRT implementation over
+`GetProcessAffinityMask`. The latter introduces
+`api-ms-win-core-processtopology-obsolete-l1-1-0.dll`, which is unavailable on
+Xbox and prevents `avutil-59.dll` from loading. `dist/uwp/ffmpeg-uwp-mf-encoder.patch`
+lets `h264_mf` with `hw_encoding=1` drive the console's hardware transform: it
+hands the transform a D3D11 device manager, polls its asynchronous events
+without blocking, describes the input type explicitly and pads input samples
+to the size the transform reports. The build script applies both overlays to
+the pinned source only for the build and restores the checkout afterward. The MSVC Store import-library directory is also placed first while
+linking so the runtime depends on `VCRUNTIME140_APP.dll` supplied by the Xbox
+VCLibs framework, never the unavailable desktop `VCRUNTIME140.dll`.
+
+Dependency resolution also enables the MOV muxer, H.263 encoder, AC-3 parser,
+and a small set of required bitstream filters. The user interface enumerates
+what these libraries actually support instead of advertising unavailable
+desktop encoders such as `libx264` or `libvpx-vp9`.
+
+The shipped binaries were produced with Visual Studio 2022 MSVC 14.44.35207,
+Windows SDK 10.0.26100.0, NASM 2.16.01, and `--disable-debug`. Every DLL is
+x64, has the PE App Container flag, and imports only OneCore/UWP-compatible
+system libraries plus the other FFmpeg DLLs.
+
+SHA-256:
+
+```text
+8DA2AA812339F963EE1B4E7283784DC1AACD16303396313919439342B833E8BB  avcodec-61.dll
+D8DEABC276F94C000CAD5F41E213E3DF624EFDFFE58E6A0BBB8F94022AF70D22  avfilter-10.dll
+94C88AB0051CB7CAE73466BBAC419CF75C9815B0E05502C23B02243A34F3DF44  avformat-61.dll
+E18A3A4B7A0EA285F5513EA8B57285FDC84A8E2D500720B2676C292863D85AD0  avutil-59.dll
+62C428DCFCCC1F6591A5225B39EB3BEAC814AE91ABB87C64F6DC5FAEAAFA0466  swresample-5.dll
+CA5CD3C15BEB1AAADC64307428353C17C13FDAAAA1EB92C269D6AA746B505F99  swscale-8.dll
+```
+
+`include/` and the import libraries in `lib/` come from the same build; Azahar
+links them directly.
+
+Run `dist/uwp/build_ffmpeg.ps1` from PowerShell to rebuild and restage the
+runtime. FFmpeg is licensed under LGPL 2.1 or later; see `LICENSE.txt`.

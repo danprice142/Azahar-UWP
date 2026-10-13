@@ -17,7 +17,6 @@
 #include "citra_uwp/ui/virtual_keyboard.h"
 #include "citra_uwp/ui/widgets.h"
 #include "common/common_paths.h"
-#include "common/dynamic_library/ffmpeg.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
 #include "common/scm_rev.h"
@@ -227,14 +226,6 @@ void DumpingDialog::LoadFFmpegChoices() {
     ffmpeg_available = false;
     formats.clear();
 
-    if (!DynamicLibrary::FFmpeg::LoadFFmpeg()) {
-        status_message =
-            "The packaged FFmpeg 6 UWP libraries could not be loaded. See azahar_log.txt for the "
-            "specific DLL or symbol error.";
-        status_is_error = true;
-        return;
-    }
-
     const auto available_formats = VideoDumper::ListFormats();
     const auto video_encoders = VideoDumper::ListEncoders(AVMEDIA_TYPE_VIDEO);
     const auto audio_encoders = VideoDumper::ListEncoders(AVMEDIA_TYPE_AUDIO);
@@ -272,13 +263,13 @@ void DumpingDialog::LoadFFmpegChoices() {
 
     if (formats.empty()) {
         status_message =
-            "FFmpeg loaded, but it exposed no output format with both a video and audio encoder.";
+            "FFmpeg exposed no output format with both a video and audio encoder.";
         status_is_error = true;
         return;
     }
 
     ffmpeg_available = true;
-    status_message = "FFmpeg 6 UWP runtime loaded.";
+    status_message = "FFmpeg 7.1 UWP runtime loaded.";
     status_is_error = false;
     SelectConfiguredValues();
 }
