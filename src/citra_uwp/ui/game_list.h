@@ -22,6 +22,10 @@
 #include "common/common_types.h"
 #include "common/play_time_manager.h"
 
+struct ImDrawList;
+struct ImGuiViewport;
+struct ImVec2;
+
 namespace Service::FS {
 enum class MediaType : u32;
 }
@@ -62,6 +66,7 @@ struct GameListEntry {
     std::shared_ptr<const GameListArtwork> box_art;
     std::shared_ptr<const GameListArtwork> large_box_art;
     std::shared_ptr<const GameListArtwork> background;
+    std::shared_ptr<const GameListArtwork> logo;
     std::optional<ScreenScraper::GameMetadata> scraped;
     bool has_icon = false;
     bool encrypted = false;
@@ -207,7 +212,9 @@ private:
                          bool favorite_first);
     void ScrapeMissingMetadata(bool force_all);
     void ApplyCachedMetadata(GameListEntry& entry);
-    std::shared_ptr<const GameListArtwork> LoadArtwork(const std::string& path);
+    /// Non-zero limits scale the image down to fit.
+    std::shared_ptr<const GameListArtwork> LoadArtwork(const std::string& path, u32 max_width = 0,
+                                                       u32 max_height = 0);
     std::shared_ptr<const GameListArtwork> LoadArtwork(const std::vector<u8>& encoded,
                                                        u64 texture_key);
 
@@ -219,6 +226,14 @@ private:
     void PruneIconTextures(bool icons_enabled);
     void ReleaseIconTextures();
     bool IsPresentationContextCurrent() const;
+
+    void DrawLibraryBackground(ImGuiViewport* viewport, double now);
+    void DrawLibraryDetails(ImDrawList* draw_list, const GameListEntry& entry, const ImVec2& origin,
+                            const ImVec2& size, float margin_x, float top, float bottom,
+                            float text_size, double now);
+    void DrawTilePlaceholder(ImDrawList* draw_list, const GameListEntry& entry, const ImVec2& min,
+                             const ImVec2& max, float alpha, float rounding, float text_size);
+    float ArtworkFade(const GameListArtwork& artwork, double now);
 
     bool MatchesFilter(const GameListEntry& entry) const;
 
@@ -274,9 +289,8 @@ private:
     bool search_requested = false;
     bool search_open = false;
     bool focus_search_input = false;
-    bool focus_first_game = true;
+    bool focus_game_row = true;
     bool focus_file_menu = false;
-    std::unordered_map<int, float> game_row_focus_amount;
     std::unordered_map<int, float> search_row_focus_amount;
     float top_menu_alpha = 1.0f;
     std::chrono::steady_clock::time_point top_menu_last_active{};
@@ -287,6 +301,17 @@ private:
     int selected_index = -1;
     int remote_focus_index = -1;
     std::function<void()> menu_callback;
+
+    int presented_selection = -1;
+    double selection_changed_at = 0.0;
+    float row_scroll = 0.0f;
+    float row_focus_amount = 1.0f;
+    bool shelf_press_on_selected = false;
+    std::shared_ptr<const GameListArtwork> shown_background;
+    std::shared_ptr<const GameListArtwork> previous_background;
+    double background_changed_at = -1e9;
+    double video_visible_since = -1.0;
+    std::unordered_map<u64, double> artwork_first_drawn;
 
     PlayTime::PlayTimeManager play_time_manager;
     std::unordered_map<u64, std::string> compatibility_list;

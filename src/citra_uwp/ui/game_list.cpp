@@ -8,8 +8,10 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <mutex>
 #include <unordered_set>
@@ -596,6 +598,212 @@ u64 HashSmdhMetadata(const std::vector<u8>& smdh_data) {
     return hash == 0 ? 1 : hash;
 }
 
+constexpr double kBackgroundDelay = 0.15;
+constexpr double kBackgroundFade = 0.6;
+constexpr double kArtFade = 0.25;
+constexpr double kVideoDelay = 0.6;
+constexpr double kSelectionGrow = 0.18;
+constexpr float kTau = 6.28318530718f;
+
+float EaseOutCubic(float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+}
+
+ImU32 WithAlpha(ImU32 color, float alpha) {
+    const float source = static_cast<float>((color >> IM_COL32_A_SHIFT) & 0xFF);
+    const auto scaled = static_cast<ImU32>(std::clamp(source * alpha, 0.0f, 255.0f));
+    return (color & ~IM_COL32_A_MASK) | (scaled << IM_COL32_A_SHIFT);
+}
+
+ImU32 White(float alpha) {
+    return IM_COL32(255, 255, 255, static_cast<int>(255.0f * std::clamp(alpha, 0.0f, 1.0f)));
+}
+
+ImTextureID ToTextureId(unsigned int texture) {
+    return static_cast<ImTextureID>(static_cast<std::uintptr_t>(texture));
+}
+
+float Aspect(const GameListArtwork& artwork) {
+    return static_cast<float>(artwork.width) / static_cast<float>(artwork.height);
+}
+
+void CropUv(float image_aspect, float rect_aspect, ImVec2& uv0, ImVec2& uv1) {
+    uv0 = ImVec2(0.0f, 0.0f);
+    uv1 = ImVec2(1.0f, 1.0f);
+    if (image_aspect > rect_aspect) {
+        uv0.x = (1.0f - rect_aspect / image_aspect) * 0.5f;
+        uv1.x = 1.0f - uv0.x;
+    } else if (image_aspect < rect_aspect) {
+        uv0.y = (1.0f - image_aspect / rect_aspect) * 0.5f;
+        uv1.y = 1.0f - uv0.y;
+    }
+}
+
+ImVec4 DrawImageFit(ImDrawList* draw_list, unsigned int texture, const GameListArtwork& artwork,
+                    const ImVec2& min, const ImVec2& max, ImU32 tint, float align_x,
+                    float align_y) {
+    const float scale = std::min((max.x - min.x) / static_cast<float>(artwork.width),
+                                 (max.y - min.y) / static_cast<float>(artwork.height));
+    const ImVec2 size{static_cast<float>(artwork.width) * scale,
+                      static_cast<float>(artwork.height) * scale};
+    const float x = min.x + (max.x - min.x - size.x) * align_x;
+    const float y = min.y + (max.y - min.y - size.y) * align_y;
+    draw_list->AddImage(ToTextureId(texture), ImVec2(x, y), ImVec2(x + size.x, y + size.y),
+                        ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), tint);
+    return ImVec4(x, y, x + size.x, y + size.y);
+}
+
+bool IsCutoutBoxArt(ScreenScraperBoxArt type) {
+    switch (type) {
+    case ScreenScraperBoxArt::Box3D:
+    case ScreenScraperBoxArt::MixRecalboxV1:
+    case ScreenScraperBoxArt::MixRecalboxV2:
+    case ScreenScraperBoxArt::GameLogo:
+    case ScreenScraperBoxArt::Support2D:
+        return true;
+    default:
+        return false;
+    }
+}
+
+float DefaultTileAspect(ScreenScraperBoxArt type) {
+    switch (type) {
+    case ScreenScraperBoxArt::SmdhIcon:
+    case ScreenScraperBoxArt::Support2D:
+        return 1.0f;
+    case ScreenScraperBoxArt::Box3D:
+        return 0.86f;
+    case ScreenScraperBoxArt::MixRecalboxV1:
+    case ScreenScraperBoxArt::MixRecalboxV2:
+    case ScreenScraperBoxArt::Screenshot:
+        return 1.33f;
+    case ScreenScraperBoxArt::FanArt:
+        return 1.78f;
+    case ScreenScraperBoxArt::GameLogo:
+        return 2.0f;
+    default:
+        return 0.9f;
+    }
+}
+
+std::string FormatReleaseDate(const std::string& date) {
+    static constexpr std::array months{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    const int fields = std::sscanf(date.c_str(), "%d-%d-%d", &year, &month, &day);
+    if (fields <= 0 || year < 1970 || year > 2100) {
+        return date;
+    }
+    const bool has_month = fields >= 2 && month >= 1 && month <= 12;
+    if (has_month && fields >= 3 && day >= 1 && day <= 31) {
+        return fmt::format("{} {} {}", day, months[static_cast<std::size_t>(month - 1)], year);
+    }
+    if (has_month) {
+        return fmt::format("{} {}", months[static_cast<std::size_t>(month - 1)], year);
+    }
+    return std::to_string(year);
+}
+
+std::string FormatPlayers(const std::string& players) {
+    if (players.empty()) {
+        return players;
+    }
+    return players == "1" ? "1 player" : players + " players";
+}
+
+std::string JoinFields(const std::vector<std::string>& fields) {
+    std::string joined;
+    for (const auto& field : fields) {
+        if (!joined.empty()) {
+            joined += "   \xC2\xB7   ";
+        }
+        joined += field;
+    }
+    return joined;
+}
+
+void DrawStar(ImDrawList* draw_list, const ImVec2& centre, float outer, ImU32 color) {
+    const float inner = outer * 0.45f;
+    ImVec2 points[10];
+    for (int point = 0; point < 10; ++point) {
+        const float radius = point % 2 == 0 ? outer : inner;
+        const float angle = -kTau / 4.0f + static_cast<float>(point) * kTau / 10.0f;
+        points[point] =
+            ImVec2(centre.x + std::cos(angle) * radius, centre.y + std::sin(angle) * radius);
+    }
+    draw_list->AddConcavePolyFilled(points, 10, color);
+}
+
+void DrawRatingStars(ImDrawList* draw_list, const ImVec2& pos, float size, int filled) {
+    const float outer = size * 0.5f;
+    const float gap = size * 0.22f;
+    for (int star = 0; star < 5; ++star) {
+        DrawStar(draw_list,
+                 ImVec2(pos.x + outer + static_cast<float>(star) * (size + gap), pos.y + outer),
+                 outer, star < filled ? IM_COL32(255, 194, 46, 255) : IM_COL32(120, 125, 135, 200));
+    }
+}
+
+float DrawWrappedLines(ImDrawList* draw_list, ImFont* font, float size, const ImVec2& pos,
+                       float wrap, int max_lines, ImU32 color, const std::string& text) {
+    const char* begin = text.c_str();
+    const char* const end = begin + text.size();
+    const float line_height = size * 1.15f;
+    float y = pos.y;
+    for (int line = 0; line < max_lines && begin < end; ++line) {
+        while (begin < end && (*begin == ' ' || *begin == '\n' || *begin == '\r')) {
+            ++begin;
+        }
+        if (begin == end) {
+            break;
+        }
+        const auto* newline = static_cast<const char*>(
+            std::memchr(begin, '\n', static_cast<std::size_t>(end - begin)));
+        const char* limit = newline != nullptr ? newline : end;
+        const char* stop = font->CalcWordWrapPosition(size, begin, limit, wrap);
+        if (stop == begin) {
+            stop = begin + 1;
+        }
+        if (line == max_lines - 1 && stop < end) {
+            std::string clipped(begin, stop);
+            while (!clipped.empty() && (clipped.back() == ' ' || clipped.back() == '\r')) {
+                clipped.pop_back();
+            }
+            clipped += "...";
+            draw_list->AddText(font, size, ImVec2(pos.x, y), color, clipped.c_str());
+        } else {
+            draw_list->AddText(font, size, ImVec2(pos.x, y), color, begin, stop);
+        }
+        y += line_height;
+        begin = stop;
+    }
+    return y - pos.y;
+}
+
+float DrawButtonHint(ImDrawList* draw_list, ImFont* font, float size, const ImVec2& pos,
+                     const char* letter, ImU32 disc, ImU32 letter_color, const char* label) {
+    const ImVec2 centre{pos.x + size * 0.5f, pos.y + size * 0.55f};
+    draw_list->AddCircleFilled(centre, size * 0.5f, disc);
+    if (letter != nullptr) {
+        const float letter_size = size * 0.7f;
+        const ImVec2 extent = font->CalcTextSizeA(letter_size, FLT_MAX, 0.0f, letter);
+        draw_list->AddText(font, letter_size,
+                           ImVec2(centre.x - extent.x * 0.5f, centre.y - extent.y * 0.5f),
+                           letter_color, letter);
+    } else {
+        const float half = size * 0.2f;
+        draw_list->AddTriangleFilled(ImVec2(centre.x, centre.y - half),
+                                     ImVec2(centre.x + half, centre.y + half * 0.7f),
+                                     ImVec2(centre.x - half, centre.y + half * 0.7f), letter_color);
+    }
+    const float label_x = pos.x + size * 1.35f;
+    draw_list->AddText(font, size, ImVec2(label_x, pos.y), IM_COL32(235, 237, 240, 230), label);
+    return label_x + font->CalcTextSizeA(size, FLT_MAX, 0.0f, label).x - pos.x;
+}
+
 } // namespace
 
 GameList::GameList()
@@ -1005,6 +1213,9 @@ void GameList::PruneIconTextures(bool icons_enabled) {
         if (entry.background) {
             live_artwork.insert(entry.background->texture_key);
         }
+        if (entry.logo) {
+            live_artwork.insert(entry.logo->texture_key);
+        }
     }
     for (auto artwork = artwork_textures.begin(); artwork != artwork_textures.end();) {
         if (live_artwork.contains(artwork->first)) {
@@ -1090,7 +1301,7 @@ void GameList::Refresh() {
     LOG_INFO(Frontend, "Scanning for applications in {}", directory);
 
     scanning = true;
-    focus_first_game = true;
+    focus_game_row = true;
     stop_scanning = false;
     const bool deep_scan = UWP::values.game_directory_deep_scan.GetValue();
     const bool hide_without_icon = UWP::values.game_list_hide_no_icon.GetValue();
@@ -1293,7 +1504,22 @@ void GameList::ScanDirectories(std::vector<std::string> directories, bool deep_s
 
     if (!stop_scanning) {
         std::lock_guard lock{entries_mutex};
+        // Keep the selection across a rescan.
+        std::string selected_path;
+        if (selected_index >= 0 && selected_index < static_cast<int>(entries.size())) {
+            selected_path = entries[static_cast<std::size_t>(selected_index)].path;
+        }
         entries = std::move(found);
+        selected_index = -1;
+        if (!selected_path.empty()) {
+            const auto selected =
+                std::find_if(entries.begin(), entries.end(), [&selected_path](const auto& entry) {
+                    return entry.path == selected_path;
+                });
+            if (selected != entries.end()) {
+                selected_index = static_cast<int>(std::distance(entries.begin(), selected));
+            }
+        }
         remote_revision.fetch_add(1, std::memory_order_relaxed);
         icon_prune_requested = true;
     }
@@ -1313,7 +1539,8 @@ void GameList::ScanDirectories(std::vector<std::string> directories, bool deep_s
     }
 }
 
-std::shared_ptr<const GameListArtwork> GameList::LoadArtwork(const std::string& path) {
+std::shared_ptr<const GameListArtwork> GameList::LoadArtwork(const std::string& path, u32 max_width,
+                                                             u32 max_height) {
     if (path.empty() || !FileUtil::Exists(path)) {
         return {};
     }
@@ -1336,12 +1563,28 @@ std::shared_ptr<const GameListArtwork> GameList::LoadArtwork(const std::string& 
     if (SUCCEEDED(result)) {
         result = frame->GetSize(&width, &height);
     }
+    ComPtr<IWICBitmapSource> source = frame;
+    bool scaled = false;
+    if (SUCCEEDED(result) && max_width != 0 && max_height != 0 && width != 0 && height != 0 &&
+        (width > max_width || height > max_height)) {
+        const double scale = std::min(static_cast<double>(max_width) / width,
+                                      static_cast<double>(max_height) / height);
+        width = std::max(1u, static_cast<UINT>(std::lround(width * scale)));
+        height = std::max(1u, static_cast<UINT>(std::lround(height * scale)));
+        ComPtr<IWICBitmapScaler> scaler;
+        result = factory->CreateBitmapScaler(&scaler);
+        if (SUCCEEDED(result)) {
+            result = scaler->Initialize(frame.Get(), width, height, WICBitmapInterpolationModeFant);
+        }
+        source = scaler;
+        scaled = true;
+    }
     ComPtr<IWICFormatConverter> converter;
     if (SUCCEEDED(result)) {
         result = factory->CreateFormatConverter(&converter);
     }
     if (SUCCEEDED(result)) {
-        result = converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA,
+        result = converter->Initialize(source.Get(), GUID_WICPixelFormat32bppRGBA,
                                        WICBitmapDitherTypeNone, nullptr, 0.0,
                                        WICBitmapPaletteTypeCustom);
     }
@@ -1365,7 +1608,9 @@ std::shared_ptr<const GameListArtwork> GameList::LoadArtwork(const std::string& 
     constexpr u64 basis = 14695981039346656037ULL;
     constexpr u64 prime = 1099511628211ULL;
     u64 key = basis;
-    for (unsigned char byte : path) {
+    // Scaled copies need their own texture.
+    const std::string key_source = scaled ? fmt::format("{}|{}x{}", path, width, height) : path;
+    for (unsigned char byte : key_source) {
         key = (key ^ byte) * prime;
     }
     artwork->texture_key = key == 0 ? 1 : key;
@@ -1450,13 +1695,19 @@ void GameList::ApplyCachedMetadata(GameListEntry& entry) {
     }
     entry.background.reset();
     const auto background_type = UWP::values.screenscraper_background.GetValue();
-    if (background_type != ScreenScraperBackground::Off) {
-        const std::string background_path = ScreenScraper::SelectedBackgroundPath(*entry.scraped);
-        if (background_type != ScreenScraperBackground::Video ||
-            background_path != entry.scraped->video_path) {
-            entry.background = LoadArtwork(background_path);
-        }
+    if (background_type == ScreenScraperBackground::Video) {
+        // A still shows until the video starts.
+        entry.background =
+            LoadArtwork(!entry.scraped->fanart_path.empty() ? entry.scraped->fanart_path
+                                                            : entry.scraped->screenshot_path);
+    } else if (background_type != ScreenScraperBackground::Off) {
+        entry.background = LoadArtwork(ScreenScraper::SelectedBackgroundPath(*entry.scraped));
     }
+    entry.logo.reset();
+    const std::string logo_path = !entry.scraped->wheel_hd_path.empty()
+                                      ? entry.scraped->wheel_hd_path
+                                      : entry.scraped->wheel_path;
+    entry.logo = LoadArtwork(logo_path, 800, 400);
 }
 
 void GameList::ScrapeMissingMetadata(bool force_all) {
@@ -1473,8 +1724,7 @@ void GameList::ScrapeMissingMetadata(bool force_all) {
                       entry.scraped->box_3d_path.empty()) ||
                      (UWP::values.screenscraper_download_box_2d_back.GetValue() &&
                       entry.scraped->box_2d_back_path.empty()) ||
-                     (UWP::values.screenscraper_download_game_logo.GetValue() &&
-                      entry.scraped->wheel_hd_path.empty() && entry.scraped->wheel_path.empty()) ||
+                     (entry.scraped->wheel_hd_path.empty() && entry.scraped->wheel_path.empty()) ||
                      (UWP::values.screenscraper_download_support_2d.GetValue() &&
                       entry.scraped->support_2d_path.empty()) ||
                      (UWP::values.screenscraper_download_mix_v1.GetValue() &&
@@ -1552,7 +1802,7 @@ void GameList::ScrapeLibrary() {
 
 void GameList::ApplyLibraryPreferences() {
     selected_index = -1;
-    focus_first_game = true;
+    focus_game_row = true;
     SortEntries();
 }
 
@@ -3360,6 +3610,249 @@ void GameList::DrawDetails() {
     }
 }
 
+float GameList::ArtworkFade(const GameListArtwork& artwork, double now) {
+    const auto [shown_at, inserted] = artwork_first_drawn.try_emplace(artwork.texture_key, now);
+    return EaseOutCubic(static_cast<float>((now - shown_at->second) / kArtFade));
+}
+
+void GameList::DrawLibraryBackground(ImGuiViewport* viewport, double now) {
+    if (selected_index != presented_selection) {
+        presented_selection = selected_index;
+        selection_changed_at = now;
+    }
+    const GameListEntry* selected =
+        selected_index >= 0 && selected_index < static_cast<int>(entries.size())
+            ? &entries[static_cast<std::size_t>(selected_index)]
+            : nullptr;
+    const auto mode = UWP::values.screenscraper_background.GetValue();
+
+    std::string video_path;
+    if (selected != nullptr && selected->scraped && mode == ScreenScraperBackground::Video &&
+        now - selection_changed_at >= kVideoDelay) {
+        video_path = selected->scraped->video_path;
+    }
+    video_background->SetPath(video_path);
+
+    ImDrawList* draw_list = ImGui::GetBackgroundDrawList(viewport);
+    const ImVec2 min = viewport->Pos;
+    const ImVec2 size = viewport->Size;
+    const ImVec2 max{min.x + size.x, min.y + size.y};
+    draw_list->AddRectFilledMultiColor(min, max, IM_COL32(20, 26, 36, 255),
+                                       IM_COL32(20, 26, 36, 255), IM_COL32(6, 8, 12, 255),
+                                       IM_COL32(6, 8, 12, 255));
+    if (mode == ScreenScraperBackground::Off) {
+        shown_background.reset();
+        previous_background.reset();
+        video_visible_since = -1.0;
+        return;
+    }
+
+    if (selected != nullptr && now - selection_changed_at >= kBackgroundDelay &&
+        selected->background != shown_background) {
+        previous_background = shown_background;
+        shown_background = selected->background;
+        background_changed_at = now;
+    }
+    const float fade =
+        EaseOutCubic(static_cast<float>((now - background_changed_at) / kBackgroundFade));
+    // Cropping would cut off parts of a mix image.
+    const bool contain = mode == ScreenScraperBackground::MixRecalboxV1 ||
+                         mode == ScreenScraperBackground::MixRecalboxV2;
+    const auto draw_still = [&](const std::shared_ptr<const GameListArtwork>& artwork,
+                                float alpha) {
+        const unsigned int texture = artwork ? GetOrCreateArtworkTexture(artwork) : 0;
+        if (texture == 0 || alpha <= 0.0f) {
+            return;
+        }
+        if (contain) {
+            DrawImageFit(draw_list, texture, *artwork, min, max, White(alpha), 0.5f, 0.5f);
+            return;
+        }
+        const float time = static_cast<float>(now);
+        const float drift = 0.5f - 0.5f * std::cos(time * kTau / 28.0f);
+        const float zoom = 1.06f + 0.06f * drift;
+        const ImVec2 zoomed{size.x * zoom, size.y * zoom};
+        const ImVec2 corner{
+            min.x + (size.x - zoomed.x) * 0.5f + std::sin(time * kTau / 41.0f) * size.x * 0.015f,
+            min.y + (size.y - zoomed.y) * 0.5f + std::cos(time * kTau / 53.0f) * size.y * 0.015f};
+        ImVec2 uv0;
+        ImVec2 uv1;
+        CropUv(Aspect(*artwork), zoomed.x / zoomed.y, uv0, uv1);
+        draw_list->AddImage(ToTextureId(texture), corner,
+                            ImVec2(corner.x + zoomed.x, corner.y + zoomed.y), uv0, uv1,
+                            White(alpha));
+    };
+    if (fade < 1.0f) {
+        draw_still(previous_background, shown_background ? 1.0f : 1.0f - fade);
+    } else {
+        previous_background.reset();
+    }
+    draw_still(shown_background, fade);
+
+    std::shared_ptr<const GameListArtwork> frame;
+    if (!video_path.empty()) {
+        frame = video_background->CurrentFrame();
+    }
+    if (!frame) {
+        video_visible_since = -1.0;
+    } else if (const unsigned int texture = GetOrCreateArtworkTexture(frame); texture != 0) {
+        if (video_visible_since < 0.0) {
+            video_visible_since = now;
+        }
+        ImVec2 uv0;
+        ImVec2 uv1;
+        CropUv(Aspect(*frame), size.x / size.y, uv0, uv1);
+        // Media Foundation rows are bottom-up.
+        std::swap(uv0.y, uv1.y);
+        draw_list->AddImage(
+            ToTextureId(texture), min, max, uv0, uv1,
+            White(EaseOutCubic(static_cast<float>((now - video_visible_since) / kBackgroundFade))));
+    }
+
+    draw_list->AddRectFilledMultiColor(min, max, IM_COL32(0, 0, 0, 89), IM_COL32(0, 0, 0, 89),
+                                       IM_COL32(0, 0, 0, 224), IM_COL32(0, 0, 0, 224));
+    draw_list->AddRectFilledMultiColor(min, ImVec2(min.x + size.x * 0.65f, max.y),
+                                       IM_COL32(0, 0, 0, 153), IM_COL32(0, 0, 0, 0),
+                                       IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 153));
+}
+
+void GameList::DrawLibraryDetails(ImDrawList* draw_list, const GameListEntry& entry,
+                                  const ImVec2& origin, const ImVec2& size, float margin_x,
+                                  float top, float bottom, float text_size, double now) {
+    ImFont* font = ImGui::GetFont();
+    const float left = origin.x + margin_x;
+    const float art_left = origin.x + size.x * 0.62f;
+
+    const unsigned int large_texture =
+        entry.large_box_art ? GetOrCreateArtworkTexture(entry.large_box_art) : 0;
+    if (large_texture != 0) {
+        DrawImageFit(draw_list, large_texture, *entry.large_box_art, ImVec2(art_left, top),
+                     ImVec2(origin.x + size.x - margin_x, bottom),
+                     White(ArtworkFade(*entry.large_box_art, now)), 1.0f, 1.0f);
+    }
+    const float column =
+        (large_texture != 0 ? art_left - size.x * 0.03f : origin.x + size.x * 0.72f) - left;
+
+    float y = top;
+    const float logo_height = (bottom - top) * 0.36f;
+    const unsigned int logo_texture = entry.logo ? GetOrCreateArtworkTexture(entry.logo) : 0;
+    if (logo_texture != 0) {
+        const ImVec4 rect = DrawImageFit(draw_list, logo_texture, *entry.logo, ImVec2(left, y),
+                                         ImVec2(left + column * 0.85f, y + logo_height),
+                                         White(ArtworkFade(*entry.logo, now)), 0.0f, 1.0f);
+        y = rect.w + size.y * 0.022f;
+    } else {
+        const std::string& title = DisplayTitle(entry);
+        const float title_size = text_size * 1.85f;
+        const ImVec2 extent = font->CalcTextSizeA(title_size, FLT_MAX, column, title.c_str());
+        y = std::max(top, top + logo_height - extent.y);
+        draw_list->AddText(font, title_size, ImVec2(left + 2.0f, y + 2.0f), IM_COL32(0, 0, 0, 160),
+                           title.c_str(), nullptr, column);
+        draw_list->AddText(font, title_size, ImVec2(left, y), IM_COL32(255, 255, 255, 255),
+                           title.c_str(), nullptr, column);
+        y += extent.y + size.y * 0.018f;
+    }
+
+    std::vector<std::string> fields;
+    if (entry.scraped) {
+        const auto& metadata = *entry.scraped;
+        if (!metadata.release_date.empty()) {
+            fields.push_back(FormatReleaseDate(metadata.release_date));
+        }
+        if (!metadata.developer.empty()) {
+            fields.push_back(metadata.developer);
+        }
+        if (!metadata.publisher.empty() && metadata.publisher != metadata.developer) {
+            fields.push_back(metadata.publisher);
+        }
+        if (!metadata.genre.empty()) {
+            fields.push_back(metadata.genre);
+        }
+        if (!metadata.players.empty()) {
+            fields.push_back(FormatPlayers(metadata.players));
+        }
+    }
+    if (const std::string meta = JoinFields(fields); !meta.empty()) {
+        y += DrawWrappedLines(draw_list, font, text_size, ImVec2(left, y), column, 2,
+                              IM_COL32(225, 228, 232, 235), meta);
+        y += text_size * 0.25f;
+    }
+
+    std::vector<std::string> facts;
+    if (entry.play_time_seconds != 0) {
+        facts.push_back("Played " + FormatDuration(entry.play_time_seconds));
+    }
+    if (!entry.region.empty()) {
+        facts.push_back(entry.region);
+    }
+    if (!entry.compatibility.empty()) {
+        facts.push_back("Compatibility: " + entry.compatibility);
+    }
+    if (!entry.file_type.empty()) {
+        facts.push_back(entry.file_type);
+    }
+    if (entry.size_bytes != 0) {
+        facts.push_back(FormatSize(entry.size_bytes));
+    }
+    if (const std::string details = JoinFields(facts); !details.empty()) {
+        y += DrawWrappedLines(draw_list, font, text_size * 0.9f, ImVec2(left, y), column, 1,
+                              IM_COL32(170, 176, 186, 220), details);
+        y += text_size * 0.3f;
+    }
+
+    if (entry.scraped && !entry.scraped->rating.empty()) {
+        DrawRatingStars(draw_list, ImVec2(left, y), text_size * 0.85f,
+                        RatingValue(entry.scraped->rating));
+        y += text_size * 1.3f;
+    }
+
+    const bool has_synopsis = entry.scraped && !entry.scraped->synopsis.empty();
+    if (y + text_size < bottom && (has_synopsis || scraping_metadata)) {
+        if (has_synopsis) {
+            const int max_lines =
+                std::clamp(static_cast<int>((bottom - y) / (text_size * 1.15f)), 1, 6);
+            DrawWrappedLines(draw_list, font, text_size, ImVec2(left, y + text_size * 0.2f), column,
+                             max_lines, IM_COL32(205, 209, 214, 225), entry.scraped->synopsis);
+        } else {
+            draw_list->AddText(font, text_size, ImVec2(left, y + text_size * 0.2f),
+                               IM_COL32(170, 176, 186, 200), "Downloading description...");
+        }
+    }
+}
+
+void GameList::DrawTilePlaceholder(ImDrawList* draw_list, const GameListEntry& entry,
+                                   const ImVec2& min, const ImVec2& max, float alpha,
+                                   float rounding, float text_size) {
+    const ImU32 top = IM_COL32(52, 58, 66, static_cast<int>(235.0f * alpha));
+    const ImU32 bottom = IM_COL32(24, 27, 31, static_cast<int>(235.0f * alpha));
+    draw_list->AddRectFilledMultiColor(min, max, top, top, bottom, bottom);
+    draw_list->AddRect(min, max, IM_COL32(255, 255, 255, static_cast<int>(40.0f * alpha)),
+                       rounding);
+
+    const float pad = std::min(max.x - min.x, max.y - min.y) * 0.1f;
+    const float wrap = max.x - min.x - pad * 2.0f;
+    float text_top = min.y;
+    float text_bottom = max.y;
+    if (const unsigned int icon = GetOrCreateIconTexture(entry); icon != 0) {
+        const float icon_size = std::min(wrap, (max.y - min.y) * 0.42f);
+        const ImVec2 icon_min{(min.x + max.x - icon_size) * 0.5f, min.y + pad * 1.5f};
+        draw_list->AddImage(ToTextureId(icon), icon_min,
+                            ImVec2(icon_min.x + icon_size, icon_min.y + icon_size),
+                            ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), White(alpha));
+        text_top = icon_min.y + icon_size + pad * 0.5f;
+        text_bottom = max.y - pad;
+    }
+    ImFont* font = ImGui::GetFont();
+    const std::string& title = DisplayTitle(entry);
+    const ImVec2 extent = font->CalcTextSizeA(text_size, FLT_MAX, wrap, title.c_str());
+    const float text_y = text_top + std::max(0.0f, (text_bottom - text_top - extent.y) * 0.5f);
+    draw_list->PushClipRect(min, max, true);
+    draw_list->AddText(font, text_size, ImVec2(min.x + pad, text_y),
+                       IM_COL32(230, 232, 235, static_cast<int>(255.0f * alpha)), title.c_str(),
+                       nullptr, wrap);
+    draw_list->PopClipRect();
+}
+
 std::string GameList::Draw() {
     std::string launch_path;
     PollMetadataOperations();
@@ -3373,7 +3866,7 @@ std::string GameList::Draw() {
     // A freshly opened library focuses its first visible title, never a menu button.
     const int current_frame = ImGui::GetFrameCount();
     if (last_home_frame + 1 != current_frame) {
-        focus_first_game = true;
+        focus_game_row = true;
         top_menu_alpha = 1.0f;
         top_menu_last_active = std::chrono::steady_clock::now();
     }
@@ -3442,68 +3935,38 @@ std::string GameList::Draw() {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
-    std::shared_ptr<const GameListArtwork> selected_background;
-    bool selected_background_is_video = false;
-    std::string selected_video;
-    {
-        std::lock_guard lock{entries_mutex};
-        if (selected_index >= 0 && selected_index < static_cast<int>(entries.size())) {
-            const auto& selected = entries[static_cast<std::size_t>(selected_index)];
-            selected_background = selected.background;
-            if (UWP::values.screenscraper_background.GetValue() == ScreenScraperBackground::Video &&
-                selected.scraped) {
-                selected_video = selected.scraped->video_path;
-            }
-        }
-    }
-    video_background->SetPath(selected_video);
-    if (!selected_video.empty()) {
-        if (auto frame = video_background->CurrentFrame()) {
-            selected_background = std::move(frame);
-            selected_background_is_video = true;
-        }
-    }
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                             ImGuiWindowFlags_NoBringToFrontOnFocus |
-                             ImGuiWindowFlags_NoSavedSettings;
-    if (selected_background) {
-        flags |= ImGuiWindowFlags_NoBackground;
-    }
-
+    constexpr ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse;
     if (!ImGui::Begin("##game_list", nullptr, flags)) {
         ImGui::End();
         return launch_path;
     }
 
-    if (selected_background) {
-        if (const unsigned int texture = GetOrCreateArtworkTexture(selected_background);
-            texture != 0) {
-            // Render behind the entire viewport rather than only the work area.
-            const ImVec2 area_min = viewport->Pos;
-            const ImVec2 area_max{area_min.x + viewport->Size.x, area_min.y + viewport->Size.y};
-            const float source_aspect = static_cast<float>(selected_background->width) /
-                                        static_cast<float>(selected_background->height);
-            const float target_aspect = viewport->Size.x / viewport->Size.y;
-            ImVec2 uv_min{0.0f, 0.0f};
-            ImVec2 uv_max{1.0f, 1.0f};
-            if (source_aspect > target_aspect) {
-                const float visible = target_aspect / source_aspect;
-                uv_min.x = (1.0f - visible) * 0.5f;
-                uv_max.x = 1.0f - uv_min.x;
-            } else {
-                const float visible = source_aspect / target_aspect;
-                uv_min.y = (1.0f - visible) * 0.5f;
-                uv_max.y = 1.0f - uv_min.y;
-            }
-            // Media Foundation video rows are bottom-up and need reversed UVs; WIC images are
-            // top-down.
-            if (selected_background_is_video) {
-                std::swap(uv_min.y, uv_max.y);
-            }
-            auto* draw_list = ImGui::GetBackgroundDrawList(viewport);
-            draw_list->AddImage(static_cast<ImTextureID>(static_cast<std::uintptr_t>(texture)),
-                                area_min, area_max, uv_min, uv_max);
-            draw_list->AddRectFilled(area_min, area_max, IM_COL32(5, 8, 14, 190));
+    const double now = ImGui::GetTime();
+    {
+        std::lock_guard lock{entries_mutex};
+        DrawLibraryBackground(viewport, now);
+    }
+
+    {
+        const std::time_t time = std::time(nullptr);
+        std::tm local{};
+        std::array<char, 8> clock{};
+        if (localtime_s(&local, &time) == 0 &&
+            std::strftime(clock.data(), clock.size(), "%H:%M", &local) != 0) {
+            const float clock_size =
+                std::max(ImGui::GetFontSize(), std::round(viewport->WorkSize.y * 0.0204f));
+            const ImVec2 extent =
+                ImGui::GetFont()->CalcTextSizeA(clock_size, FLT_MAX, 0.0f, clock.data());
+            const float margin =
+                std::max(ImGui::GetStyle().WindowPadding.x, viewport->WorkSize.x * 0.05f);
+            ImGui::GetWindowDrawList()->AddText(
+                ImGui::GetFont(), clock_size,
+                ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - margin - extent.x,
+                       ImGui::GetCursorScreenPos().y + (ImGui::GetFrameHeight() - extent.y) * 0.5f),
+                IM_COL32(220, 224, 228, 200), clock.data());
         }
     }
 
@@ -3550,7 +4013,7 @@ std::string GameList::Draw() {
         const bool menu_button_focused =
             std::find(menu_ids.begin(), menu_ids.end(), nav_id) != menu_ids.end();
         if (menu_button_focused && ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown, false)) {
-            focus_first_game = true;
+            focus_game_row = true;
         }
         ImGui::Spacing();
     }
@@ -3729,9 +4192,38 @@ std::string GameList::Draw() {
         search_open = false;
     }
 
-    if (entries.empty() && !scanning) {
-        ImGui::Spacing();
-        ImGui::TextWrapped("No applications found in %s", directory.c_str());
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const ImGuiIO& io = ImGui::GetIO();
+    ImFont* font = ImGui::GetFont();
+    const ImVec2 origin = viewport->WorkPos;
+    const ImVec2 area = viewport->WorkSize;
+    const float content_top = ImGui::GetCursorScreenPos().y;
+    const float text_size = std::max(ImGui::GetFontSize(), std::round(area.y * 0.0204f));
+    const float margin_x = std::max(ImGui::GetStyle().WindowPadding.x, area.x * 0.05f);
+    const float hint_y = origin.y + area.y - area.y * 0.05f - text_size;
+    const float left = origin.x + margin_x;
+
+    const auto draw_message = [&](const char* title, const std::string& detail) {
+        const float title_size = text_size * 1.55f;
+        const ImVec2 title_extent = font->CalcTextSizeA(title_size, FLT_MAX, 0.0f, title);
+        const float y = origin.y + area.y * 0.45f;
+        draw_list->AddText(font, title_size, ImVec2(origin.x + (area.x - title_extent.x) * 0.5f, y),
+                           IM_COL32(255, 255, 255, 255), title);
+        if (!detail.empty()) {
+            const float wrap = area.x - margin_x * 2.0f;
+            const ImVec2 extent = font->CalcTextSizeA(text_size, FLT_MAX, wrap, detail.c_str());
+            draw_list->AddText(font, text_size,
+                               ImVec2(origin.x + (area.x - extent.x) * 0.5f,
+                                      y + title_extent.y + text_size * 0.6f),
+                               IM_COL32(210, 214, 220, 220), detail.c_str(), nullptr, wrap);
+        }
+    };
+    if (entries.empty()) {
+        if (scanning) {
+            draw_message("Looking for games...", {});
+        } else {
+            draw_message("No games found", fmt::format("No applications found in {}", directory));
+        }
         ImGui::End();
         return launch_path;
     }
@@ -3743,253 +4235,265 @@ std::string GameList::Draw() {
             visible_entries.push_back(i);
         }
     }
-    if (!scanning && (selected_index < 0 || selected_index >= static_cast<int>(entries.size())) &&
-        !visible_entries.empty()) {
-        selected_index = visible_entries.front();
+    if (visible_entries.empty()) {
+        draw_message("No games to show", "The View > Game List filters hide every title.");
+        ImGui::End();
+        return launch_path;
     }
-    const bool has_selection =
-        !scanning && selected_index >= 0 && selected_index < static_cast<int>(entries.size());
-    const ImGuiStyle& style = ImGui::GetStyle();
-    const ImVec2 library_size = ImGui::GetContentRegionAvail();
-    const float list_inset = std::max(16.0f, ImGui::GetFontSize() * 0.6f);
-    const float detail_width =
-        has_selection ? std::clamp(library_size.x * 0.32f, ImGui::GetFontSize() * 21.0f,
-                                   ImGui::GetFontSize() * 31.0f)
-                      : 0.0f;
-    const float list_width =
-        std::max(1.0f, (has_selection ? library_size.x - detail_width - style.ItemSpacing.x
-                                      : library_size.x) -
-                           list_inset);
+    auto selected_entry = std::find(visible_entries.begin(), visible_entries.end(), selected_index);
+    if (selected_entry == visible_entries.end()) {
+        selected_entry = visible_entries.begin();
+        selected_index = *selected_entry;
+    }
+    int selected_position =
+        static_cast<int>(std::distance(visible_entries.begin(), selected_entry));
+    const int count = static_cast<int>(visible_entries.size());
 
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + list_inset);
+    const auto box_art_type = UWP::values.screenscraper_box_art.GetValue();
+    float tile_aspect =
+        UWP::values.screenscraper_enabled.GetValue() ? DefaultTileAspect(box_art_type) : 1.0f;
+    {
+        std::vector<float> aspects;
+        for (const int index : visible_entries) {
+            const auto& art = entries[static_cast<std::size_t>(index)].box_art;
+            if (art && art->width != 0 && art->height != 0) {
+                aspects.push_back(Aspect(*art));
+            }
+        }
+        if (!aspects.empty()) {
+            const auto middle = aspects.begin() + static_cast<std::ptrdiff_t>(aspects.size() / 2);
+            std::nth_element(aspects.begin(), middle, aspects.end());
+            tile_aspect = std::clamp(*middle, 0.5f, 2.0f);
+        }
+    }
+    const float tile_h = std::round(area.y * 0.235f);
+    const float tile_w = std::round(tile_h * tile_aspect);
+    const float gap = std::round(area.y * 0.026f);
+    const float pitch = tile_w + gap;
+    const float row_bottom = hint_y - text_size;
+    const float row_top = row_bottom - tile_h;
+    const int visible = std::max(1, static_cast<int>((area.x - 2.0f * margin_x + gap) / pitch));
+
+    // The whole shelf is one nav item, so Up and Down move to and from the menu row.
+    const float pad_x = ImGui::GetStyle().WindowPadding.x;
+    const bool focus_requested = focus_game_row || remote_focus_index >= 0;
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + pad_x, row_top));
+    if (focus_requested) {
+        ImGui::SetKeyboardFocusHere();
+    }
     ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 0.0f);
-    if (ImGui::BeginChild("##library_games", ImVec2(list_width, 0.0f),
-                          ImGuiChildFlags_NavFlattened)) {
-        const bool list_focused =
-            ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::GetIO().WantTextInput;
-        if (list_focused && !visible_entries.empty() && selected_index == visible_entries.front() &&
-            ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp, false)) {
+    const bool row_activated =
+        ImGui::InvisibleButton("##game_row", ImVec2(std::max(1.0f, area.x - pad_x * 2.0f), tile_h),
+                               ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
+    const bool row_focused = ImGui::IsItemFocused() && !io.WantTextInput;
+    if (focus_requested) {
+        focus_game_row = false;
+        remote_focus_index = -1;
+    }
+
+    if (row_focused) {
+        int target = selected_position;
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft)) {
+            target = std::max(0, target - 1);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight)) {
+            target = std::min(count - 1, target + 1);
+        }
+        const int page = std::max(1, visible - 1);
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1)) {
+            target = std::max(0, target - page);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1)) {
+            target = std::min(count - 1, target + page);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
+            target = 0;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_End, false)) {
+            target = count - 1;
+        }
+        selected_position = target;
+        selected_index = visible_entries[static_cast<std::size_t>(target)];
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp, false)) {
             focus_file_menu = true;
         }
-        if (list_focused && has_selection && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false)) {
             OpenDetails(entries[static_cast<std::size_t>(selected_index)]);
         }
-        if (list_focused && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceUp, false)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceUp, false)) {
             OpenSearch();
         }
-        constexpr ImGuiTableFlags table_flags =
-            ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
-        // Flatten the table's inner child so the list and the menu buttons share one nav scope.
-        ImGuiContext* context = ImGui::GetCurrentContext();
-        context->NextWindowData.HasFlags |= ImGuiNextWindowDataFlags_HasChildFlags;
-        context->NextWindowData.ChildFlags |= ImGuiChildFlags_NavFlattened;
-        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(0.0f, 0.0f));
-        const ImVec4 transparent{0.0f, 0.0f, 0.0f, 0.0f};
-        ImGui::PushStyleColor(ImGuiCol_Header, transparent);
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, transparent);
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, transparent);
-        if (ImGui::BeginTable("##games", 1, table_flags)) {
-            ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthStretch);
-
-            const bool show_box_art = UWP::values.screenscraper_enabled.GetValue();
-            const float base_artwork_height =
-                show_box_art ? std::max(72.0f, ImGui::GetFontSize() * 3.4f) * kDefaultArtworkScale
-                             : 0.0f;
-            const float row_padding =
-                show_box_art ? std::max(10.0f, ImGui::GetFontSize() * 0.4f) : 0.0f;
-            const float artwork_text_gap = std::max(12.0f, ImGui::GetFontSize() * 0.5f);
-            const float text_block_height = ImGui::CalcTextSize("Ag").y;
-            const float base_row_height = std::max(base_artwork_height + row_padding * 2.0f,
-                                                   text_block_height + style.FramePadding.y * 2.0f);
-            // Keep every row slot the same size while its contents animate.
-            const float row_height = base_row_height * kFocusedRowScale;
-
-            if (remote_focus_index >= 0) {
-                // Scroll a remotely chosen row into the clipper's range so focus can land on it.
-                const auto target =
-                    std::find(visible_entries.begin(), visible_entries.end(), remote_focus_index);
-                if (target == visible_entries.end()) {
-                    remote_focus_index = -1;
-                } else {
-                    const float row_top =
-                        static_cast<float>(std::distance(visible_entries.begin(), target)) *
-                        row_height;
-                    ImGui::SetScrollY(std::max(
-                        0.0f, row_top - (ImGui::GetWindowHeight() - row_height) * 0.5f));
-                }
-            }
-
-            // Upload only visible artwork.
-            ImGuiListClipper clipper;
-            clipper.Begin(static_cast<int>(visible_entries.size()));
-            while (clipper.Step()) {
-                for (int visible_index = clipper.DisplayStart; visible_index < clipper.DisplayEnd;
-                     ++visible_index) {
-                    const int i = visible_entries[static_cast<std::size_t>(visible_index)];
-                    const auto& entry = entries[static_cast<std::size_t>(i)];
-
-                    ImGui::TableNextRow(ImGuiTableRowFlags_None, row_height);
-                    ImGui::PushID(i);
-                    ImGui::TableSetColumnIndex(0);
-
-                    const bool focus_this_game =
-                        (focus_first_game && visible_index == 0) || i == remote_focus_index;
-                    if (focus_this_game) {
-                        // Called inside the table so the request lands on the first
-                        // Selectable, not the table child.
-                        ImGui::SetKeyboardFocusHere();
-                    }
-
-                    const ImGuiID row_id = ImGui::GetID("##game");
-                    const bool row_focused = list_focused && context->NavId == row_id;
-                    const float focus_scale =
-                        AdvanceRowFocusAnimation(game_row_focus_amount, i, row_focused);
-                    const bool selected = list_focused && selected_index == i;
-                    std::string display_name = DisplayTitle(entry);
-                    if (entry.favorite) {
-                        display_name.insert(0, "[F] ");
-                    }
-                    if (entry.can_insert &&
-                        UWP::values.inserted_cartridge.GetValue() == entry.path) {
-                        display_name.insert(0, "[Cart] ");
-                    }
-
-                    if (ImGui::Selectable("##game", selected, ImGuiSelectableFlags_SpanAllColumns,
-                                          ImVec2(0.0f, row_height))) {
-                        selected_index = i;
-                        launch_path = entry.path;
-                    }
-                    if (ImGui::IsItemFocused()) {
-                        selected_index = i;
-                    }
-                    if (focus_this_game) {
-                        selected_index = i;
-                        focus_first_game = false;
-                        remote_focus_index = -1;
-                    }
-
-                    const ImVec2 row_min = ImGui::GetItemRectMin();
-                    const ImVec2 row_max = ImGui::GetItemRectMax();
-                    const float rendered_row_height = row_max.y - row_min.y;
-                    const float artwork_height = base_artwork_height * focus_scale;
-                    float content_x =
-                        row_min.x + (show_box_art ? row_padding * focus_scale
-                                                  : style.FramePadding.x * focus_scale);
-                    if (show_box_art && entry.box_art) {
-                        const float draw_width = artwork_height *
-                                                 static_cast<float>(entry.box_art->width) /
-                                                 static_cast<float>(entry.box_art->height);
-                        const unsigned int texture = GetOrCreateArtworkTexture(entry.box_art);
-                        const float image_y =
-                            row_min.y + (rendered_row_height - artwork_height) * 0.5f;
-                        if (texture != 0) {
-                            ImGui::GetWindowDrawList()->AddImage(
-                                static_cast<ImTextureID>(static_cast<std::uintptr_t>(texture)),
-                                ImVec2(content_x, image_y),
-                                ImVec2(content_x + draw_width, image_y + artwork_height));
-                        }
-                        content_x += draw_width + artwork_text_gap * focus_scale;
-                    }
-
-                    const float label_height =
-                        ImGui::CalcTextSize(display_name.c_str()).y * focus_scale;
-                    const float label_y = row_min.y + (rendered_row_height - label_height) * 0.5f;
-                    const float name_clip_right = row_max.x - style.CellPadding.x;
-                    auto* draw_list = ImGui::GetWindowDrawList();
-                    draw_list->PushClipRect(ImVec2(content_x, row_min.y),
-                                            ImVec2(name_clip_right, row_max.y), true);
-                    draw_list->AddText(ImGui::GetFont(), ImGui::GetFontSize() * focus_scale,
-                                       ImVec2(content_x, label_y),
-                                       ImGui::GetColorU32(ImGuiCol_Text), display_name.c_str());
-                    draw_list->PopClipRect();
-
-                    ImGui::PopID();
-                }
-            }
-            ImGui::EndTable();
-        }
-        ImGui::PopStyleColor(3);
-        ImGui::PopStyleVar();
     }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
 
-    if (has_selection) {
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-        if (ImGui::BeginChild("##selected_game", ImVec2(detail_width, 0.0f),
-                              ImGuiChildFlags_AlwaysUseWindowPadding,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMouseInputs |
-                                  ImGuiWindowFlags_NoNavInputs | ImGuiWindowFlags_NoNavFocus)) {
-            // The right stick scrolls the details pane without moving focus.
-            const float down = ImGui::GetKeyData(ImGuiKey_GamepadRStickDown)->AnalogValue;
-            const float up = ImGui::GetKeyData(ImGuiKey_GamepadRStickUp)->AnalogValue;
-            const float scroll_speed = ImGui::GetFontSize() * 21.0f * ImGui::GetIO().DeltaTime;
-            ImGui::SetScrollY(ImGui::GetScrollY() + (down - up) * scroll_speed);
-
-            const auto& entry = entries[static_cast<std::size_t>(selected_index)];
-            const unsigned int artwork_texture =
-                entry.large_box_art ? GetOrCreateArtworkTexture(entry.large_box_art) : 0;
-            if (artwork_texture != 0) {
-                const float source_width = static_cast<float>(entry.large_box_art->width);
-                const float source_height = static_cast<float>(entry.large_box_art->height);
-                const ImVec2 available = ImGui::GetContentRegionAvail();
-                const float max_width = available.x;
-                const float max_height = std::min(available.y * 0.52f, 400.0f);
-                const float scale = std::min(max_width / source_width, max_height / source_height);
-                const ImVec2 draw_size{source_width * scale, source_height * scale};
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
-                                     std::max(0.0f, (available.x - draw_size.x) * 0.5f));
-                ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(artwork_texture)),
-                             draw_size);
-                ImGui::Spacing();
-            }
-
-            ImGui::TextWrapped("%s", DisplayTitle(entry).c_str());
-            if (scraping_metadata) {
-                ImGui::TextColored(ImVec4(0.72f, 0.72f, 0.74f, 1.0f),
-                                   "Updating artwork & descriptions...");
-            }
-            DrawFiveStarRating(entry.scraped ? entry.scraped->rating : std::string{});
-            ImGui::Spacing();
-
-            if (entry.scraped && !entry.scraped->synopsis.empty()) {
-                ImGui::TextWrapped("%s", entry.scraped->synopsis.c_str());
-            } else if (scraping_metadata) {
-                ImGui::TextDisabled("Downloading description...");
-            } else {
-                ImGui::TextDisabled("No description available.");
-            }
-            ImGui::Spacing();
-
-            const auto metadata_field = [](const char* label, const std::string& value) {
-                if (value.empty()) {
-                    return;
-                }
-                ImGui::TextDisabled("%s", label);
-                ImGui::SameLine();
-                ImGui::TextWrapped("%s", value.c_str());
-            };
-            metadata_field("Play time", FormatDuration(entry.play_time_seconds));
-            if (entry.scraped) {
-                metadata_field("Publisher", entry.scraped->publisher);
-                metadata_field("Developer", entry.scraped->developer);
-                metadata_field("Genre", entry.scraped->genre);
-                metadata_field("Released", entry.scraped->release_date);
-            }
-            metadata_field("Region", entry.region);
-            if (entry.scraped) {
-                metadata_field("Players", entry.scraped->players);
-            }
-            metadata_field("Compatibility", entry.compatibility);
-            metadata_field("Format", entry.file_type);
-            metadata_field("Size", FormatSize(entry.size_bytes));
+    int hovered_position = -1;
+    if (!(io.ConfigFlags & ImGuiConfigFlags_NoMouse) && ImGui::IsMousePosValid() &&
+        io.MousePos.y >= row_top && io.MousePos.y <= row_bottom) {
+        const float slot = (io.MousePos.x - left) / pitch + row_scroll;
+        const int position = static_cast<int>(std::floor(slot));
+        if (position >= 0 && position < count &&
+            (slot - static_cast<float>(position)) * pitch <= tile_w) {
+            hovered_position = position;
         }
-        ImGui::EndChild();
-        ImGui::PopStyleColor(2);
+    }
+    if (hovered_position >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        shelf_press_on_selected = hovered_position == selected_position;
+        selected_position = hovered_position;
+        selected_index = visible_entries[static_cast<std::size_t>(hovered_position)];
+    }
+    if (row_activated && (!ImGui::IsMouseReleased(ImGuiMouseButton_Left) ||
+                          (shelf_press_on_selected && hovered_position == selected_position))) {
+        launch_path = entries[static_cast<std::size_t>(selected_index)].path;
+    }
+
+    const float delta_time = std::max(io.DeltaTime, 0.0f);
+    const int first = std::clamp(selected_position - 1, 0, std::max(0, count - visible));
+    row_scroll += (static_cast<float>(first) - row_scroll) * (1.0f - std::exp(-delta_time * 14.0f));
+    if (std::abs(row_scroll - static_cast<float>(first)) < 0.001f) {
+        row_scroll = static_cast<float>(first);
+    }
+    row_scroll = std::clamp(row_scroll, 0.0f, static_cast<float>(count - 1));
+    row_focus_amount +=
+        ((row_focused ? 1.0f : 0.0f) - row_focus_amount) * (1.0f - std::exp(-delta_time * 12.0f));
+
+    const float details_top =
+        std::max(content_top + area.y * 0.01f, origin.y + area.y * 0.085f + text_size);
+    DrawLibraryDetails(draw_list, entries[static_cast<std::size_t>(selected_index)], origin, area,
+                       margin_x, details_top, row_top - tile_h * 0.16f, text_size, now);
+
+    const float grow =
+        EaseOutCubic(static_cast<float>((now - selection_changed_at) / kSelectionGrow)) *
+        row_focus_amount;
+    const float rounding = std::min(tile_w, tile_h) * 0.04f;
+    const bool cutout = IsCutoutBoxArt(box_art_type);
+    const std::string inserted_cartridge = UWP::values.inserted_cartridge.GetValue();
+    const int first_drawn = std::max(0, static_cast<int>(std::floor(row_scroll)) - 1);
+    const int last_drawn = std::min(count - 1, static_cast<int>(std::ceil(row_scroll)) +
+                                                   static_cast<int>(area.x / pitch) + 1);
+    const float fade_left = origin.x + margin_x * 0.5f;
+    const float fade_right = origin.x + area.x - margin_x * 0.5f;
+    // Draw the selected tile last so it overlaps its neighbours.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int position = first_drawn; position <= last_drawn; ++position) {
+            const bool selected = position == selected_position;
+            if (selected != (pass == 1)) {
+                continue;
+            }
+            const auto& entry = entries[static_cast<std::size_t>(
+                visible_entries[static_cast<std::size_t>(position)])];
+            const float x = left + (static_cast<float>(position) - row_scroll) * pitch;
+            ImVec2 a{x, row_top};
+            ImVec2 b{x + tile_w, row_bottom};
+            float edge_alpha = 1.0f;
+            if (b.x > fade_right) {
+                edge_alpha = std::clamp(1.0f - (b.x - fade_right) / pitch, 0.0f, 1.0f);
+            } else if (a.x < fade_left) {
+                edge_alpha = std::clamp(1.0f - (fade_left - a.x) / pitch, 0.0f, 1.0f);
+            }
+            if (edge_alpha <= 0.0f) {
+                continue;
+            }
+            if (selected) {
+                const float scale = 1.0f + 0.1f * grow;
+                const float centre = (a.x + b.x) * 0.5f;
+                a = ImVec2(centre - tile_w * 0.5f * scale, b.y - tile_h * scale);
+                b = ImVec2(centre + tile_w * 0.5f * scale, b.y);
+            }
+
+            const auto& art = entry.box_art;
+            const unsigned int texture = art ? GetOrCreateArtworkTexture(art) : 0;
+            const ImU32 tint = WithAlpha(
+                selected ? IM_COL32(255, 255, 255, 255) : IM_COL32(190, 190, 190, 255), edge_alpha);
+            if (texture != 0 && cutout) {
+                if (selected) {
+                    draw_list->AddRectFilled(
+                        a, b, IM_COL32(255, 255, 255, static_cast<int>(28.0f * edge_alpha * grow)),
+                        rounding);
+                }
+                DrawImageFit(draw_list, texture, *art, a, b, tint, 0.5f, 1.0f);
+            } else if (texture != 0) {
+                draw_list->AddRectFilled(
+                    ImVec2(a.x, a.y + tile_h * 0.025f), ImVec2(b.x, b.y + tile_h * 0.04f),
+                    IM_COL32(0, 0, 0, static_cast<int>(110.0f * edge_alpha)), rounding);
+                const float rect_aspect = (b.x - a.x) / (b.y - a.y);
+                if (std::abs(Aspect(*art) / rect_aspect - 1.0f) < 0.25f) {
+                    ImVec2 uv0;
+                    ImVec2 uv1;
+                    CropUv(Aspect(*art), rect_aspect, uv0, uv1);
+                    draw_list->AddImageRounded(ToTextureId(texture), a, b, uv0, uv1, tint,
+                                               rounding);
+                } else {
+                    draw_list->AddRectFilled(
+                        a, b, IM_COL32(20, 22, 26, static_cast<int>(220.0f * edge_alpha)),
+                        rounding);
+                    DrawImageFit(draw_list, texture, *art, a, b, tint, 0.5f, 0.5f);
+                }
+            } else {
+                DrawTilePlaceholder(draw_list, entry, a, b, edge_alpha, rounding, text_size * 0.9f);
+            }
+
+            const float badge = tile_h * 0.11f;
+            if (entry.favorite) {
+                const ImVec2 centre{a.x + badge * 0.8f, a.y + badge * 0.8f};
+                draw_list->AddCircleFilled(
+                    centre, badge * 0.6f, IM_COL32(0, 0, 0, static_cast<int>(160.0f * edge_alpha)));
+                DrawStar(draw_list, centre, badge * 0.45f,
+                         WithAlpha(IM_COL32(255, 194, 46, 255), edge_alpha));
+            }
+            if (entry.can_insert && inserted_cartridge == entry.path) {
+                const char* label = "CART";
+                const float label_size = text_size * 0.65f;
+                const ImVec2 extent = font->CalcTextSizeA(label_size, FLT_MAX, 0.0f, label);
+                const ImVec2 pill_max{b.x - badge * 0.3f, a.y + badge * 0.3f + extent.y * 1.4f};
+                const ImVec2 pill_min{pill_max.x - extent.x - label_size, a.y + badge * 0.3f};
+                draw_list->AddRectFilled(pill_min, pill_max,
+                                         IM_COL32(0, 0, 0, static_cast<int>(170.0f * edge_alpha)),
+                                         (pill_max.y - pill_min.y) * 0.5f);
+                draw_list->AddText(
+                    font, label_size,
+                    ImVec2(pill_min.x + label_size * 0.5f, pill_min.y + extent.y * 0.2f),
+                    White(edge_alpha), label);
+            }
+
+            if (selected) {
+                const float pulse = 0.75f + 0.25f * std::sin(static_cast<float>(now) * 3.0f);
+                for (int ring = 1; ring <= 3; ++ring) {
+                    const float spread = static_cast<float>(ring) * tile_h * 0.008f;
+                    draw_list->AddRect(ImVec2(a.x - spread, a.y - spread),
+                                       ImVec2(b.x + spread, b.y + spread),
+                                       IM_COL32(255, 255, 255,
+                                                static_cast<int>(70.0f * edge_alpha * grow * pulse /
+                                                                 static_cast<float>(ring))),
+                                       rounding + spread, 0, 2.0f);
+                }
+                if (!cutout || texture == 0) {
+                    draw_list->AddRect(a, b, White(edge_alpha * row_focus_amount), rounding, 0,
+                                       std::max(2.0f, tile_h * 0.008f));
+                }
+            }
+        }
+    }
+
+    float hint_x = left;
+    const float hint_gap = text_size * 1.4f;
+    hint_x += DrawButtonHint(draw_list, font, text_size, ImVec2(hint_x, hint_y), "A",
+                             IM_COL32(84, 170, 62, 255), IM_COL32(255, 255, 255, 255), "Play") +
+              hint_gap;
+    hint_x += DrawButtonHint(draw_list, font, text_size, ImVec2(hint_x, hint_y), "X",
+                             IM_COL32(46, 120, 214, 255), IM_COL32(255, 255, 255, 255), "Details") +
+              hint_gap;
+    hint_x += DrawButtonHint(draw_list, font, text_size, ImVec2(hint_x, hint_y), "Y",
+                             IM_COL32(232, 182, 34, 255), IM_COL32(30, 30, 30, 255), "Search") +
+              hint_gap;
+    DrawButtonHint(draw_list, font, text_size, ImVec2(hint_x, hint_y), nullptr,
+                   IM_COL32(120, 126, 136, 255), IM_COL32(255, 255, 255, 255), "Menu");
+    const char* status = scanning            ? "Scanning library..."
+                         : scraping_metadata ? "Updating artwork & descriptions..."
+                                             : nullptr;
+    if (status != nullptr) {
+        const ImVec2 extent = font->CalcTextSizeA(text_size, FLT_MAX, 0.0f, status);
+        draw_list->AddText(font, text_size, ImVec2(origin.x + area.x - margin_x - extent.x, hint_y),
+                           IM_COL32(190, 196, 204, 200), status);
     }
 
     ImGui::End();

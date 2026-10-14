@@ -1130,10 +1130,10 @@ Result Scrape(const ScrapeRequest& request, const std::atomic<bool>* cancelled) 
           metadata.box_3d_path);
     media(UWP::values.screenscraper_download_box_2d_back.GetValue(), "box-2D-back",
           L"box-2d-back.png", metadata.box_2d_back_path);
-    media(UWP::values.screenscraper_download_game_logo.GetValue(), "wheel-hd", L"wheel-hd.png",
-          metadata.wheel_hd_path);
-    media(UWP::values.screenscraper_download_game_logo.GetValue(), "wheel", L"wheel.png",
-          metadata.wheel_path);
+    // The library always shows a logo.
+    media(true, "wheel-hd", L"wheel-hd.png", metadata.wheel_hd_path);
+    media(UWP::values.screenscraper_download_game_logo.GetValue() || metadata.wheel_hd_path.empty(),
+          "wheel", L"wheel.png", metadata.wheel_path);
     media(UWP::values.screenscraper_download_support_2d.GetValue(), "support-2D", L"support-2d.png",
           metadata.support_2d_path);
     media(UWP::values.screenscraper_download_mix_v1.GetValue(), "mixrbv1", L"mix-v1.png",
